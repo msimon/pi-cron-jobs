@@ -58,33 +58,29 @@ That marker is the authoritative task status — it catches **soft failures** li
 
 ## Install
 
+### Via `pi install` (recommended)
+
+```bash
+pi install git:github.com/msimon/pi-cron-jobs
+```
+
+This clones the repo, runs `npm install` (which triggers `postinstall` to build the binary and symlink it to `~/.local/bin/pi-cron-jobs`), and registers the extension automatically. Requires [bun](https://bun.sh) to be installed.
+
+Make sure `~/.local/bin` is in your PATH:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
+```
+
+### Manual install
+
 ```bash
 git clone https://github.com/msimon/pi-cron-jobs.git
 cd pi-cron-jobs
-bun install
+bun install          # also builds the binary and installs it
 
-# 1. build the self-contained binary
-bun run build
-
-# 2. install it to a stable path (~/.pi/cron-jobs/bin)
-./dist/pi-cron-jobs install-bin
-
-# 3. put it on your PATH
-ln -sf ~/.pi/cron-jobs/bin/pi-cron-jobs ~/.local/bin/pi-cron-jobs
-
-# 4. register the pi extension (adds the path to ~/.pi/agent/settings.json
-#    "extensions" array), then restart pi or run /reload
-```
-
-For step 4, add the absolute path to `extension/index.ts` to the `extensions`
-array in `~/.pi/agent/settings.json`:
-
-```json
-{
-  "extensions": [
-    "/absolute/path/to/pi-cron-jobs/extension/index.ts"
-  ]
-}
+# If you want to register the extension manually instead:
+# add the path to extension/index.ts in ~/.pi/agent/settings.json
 ```
 
 > Extensions run with full system permissions. Review the source before installing.

@@ -9,10 +9,15 @@
   "scripts": {
     "cli": "bun src/cli.ts",
     "build": "bun build src/cli.ts --compile --outfile dist/pi-cron-jobs",
+    "postinstall": "bash scripts/postinstall.sh",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
+  "keywords": ["pi-package"],
   "license": "MIT",
+  "pi": {
+    "extensions": ["./extension"]
+  },
   "devDependencies": {
     "@types/bun": "^1.3.14",
     "@types/node": "^22.20.0",

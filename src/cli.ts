@@ -9,7 +9,7 @@ import * as store from "./core/store";
 import * as paths from "./core/paths";
 import { runJob } from "./core/run";
 import { slugify } from "./core/ids";
-import * as launchd from "./scheduler/launchd";
+import { getScheduler } from "./scheduler/index";
 import { expandCron } from "./scheduler/cron";
 import type { Job, Schedule, ThreadMode } from "./core/types";
 
@@ -56,7 +56,7 @@ function die(msg: string): never {
 
 // ---- commands ----
 
-function cmdAdd(f: Flags): void {
+async function cmdAdd(f: Flags): Promise<void> {
 	const name = f.vals.get("name") ?? die("--name required");
 	const prompt = f.vals.get("prompt") ?? die("--prompt required");
 	const cron = f.vals.get("cron");
@@ -106,7 +106,8 @@ function cmdAdd(f: Flags): void {
 		timeoutMs: parseDuration(f.vals.get("timeout"), 600_000),
 	};
 	store.upsertJob(job);
-	launchd.install(job);
+	const scheduler = await getScheduler();
+	scheduler.install(job);
 	console.log(`added + scheduled "${id}" (${describeSchedule(schedule)}) cwd=${job.cwd}`);
 }
 
@@ -170,7 +171,8 @@ async function cmdRun(f: Flags): Promise<void> {
 	// the job, but keep the log and the conversation as the trace.
 	const job = store.getJob(id);
 	if (job && job.schedule.kind === "once" && exec.status !== "skipped") {
-		launchd.remove(id);
+		const scheduler = await getScheduler();
+		scheduler.remove(id);
 		store.removeJob(id);
 	}
 	if (f.bools.has("json")) {
@@ -183,15 +185,17 @@ async function cmdRun(f: Flags): Promise<void> {
 	console.log(`resume: pi-cron-jobs resume ${exec.executionId}`);
 }
 
-function cmdRm(f: Flags): void {
+async function cmdRm(f: Flags): Promise<void> {
 	const id = f._[0] ?? die("usage: rm <jobId>");
-	launchd.remove(id);
+	const scheduler = await getScheduler();
+	scheduler.remove(id);
 	if (store.removeJob(id)) console.log(`removed + unscheduled job "${id}"`);
 	else die(`no such job: ${id}`);
 }
 
-function cmdSync(f: Flags): void {
-	const { installed, removed } = launchd.sync(store.readJobs());
+async function cmdSync(f: Flags): Promise<void> {
+	const scheduler = await getScheduler();
+	const { installed, removed } = scheduler.sync(store.readJobs());
 	if (f.bools.has("json")) {
 		console.log(JSON.stringify({ installed, removed }, null, 2));
 		return;
@@ -201,8 +205,9 @@ function cmdSync(f: Flags): void {
 	if (removed.length) console.log(`  removed:   ${removed.join(", ")}`);
 }
 
-function cmdStatus(f: Flags): void {
-	const entries = launchd.status(store.readJobs());
+async function cmdStatus(f: Flags): Promise<void> {
+	const scheduler = await getScheduler();
+	const entries = scheduler.status(store.readJobs());
 	if (f.bools.has("json")) {
 		console.log(JSON.stringify(entries, null, 2));
 		return;

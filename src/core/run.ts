@@ -23,13 +23,18 @@ interface SpawnResult {
 	stdout: string;
 }
 
-export function buildPiArgs(job: Job, sessionId: string): string[] {
+function fmtLocal(d: Date): string {
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+export function buildPiArgs(job: Job, sessionId: string, now = new Date()): string[] {
 	const args = [
 		"--print",
 		"--session-id",
 		sessionId,
 		"--name",
-		job.name,
+		`${job.name} · ${fmtLocal(now)}`,
 		"--append-system-prompt",
 		markerInstruction(),
 	];
@@ -156,7 +161,7 @@ export async function runJob(
 	try {
 		mkdirSync(path.dirname(logPath), { recursive: true });
 		const piBin = opts.piBin ?? process.env.PI_BIN ?? "pi";
-		const args = buildPiArgs(job, sessionId);
+		const args = buildPiArgs(job, sessionId, now);
 		const result = await spawnPi(piBin, args, job.cwd, logPath, job.timeoutMs);
 		const marker = parseMarker(result.stdout);
 

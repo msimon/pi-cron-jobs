@@ -16,6 +16,12 @@ import type { Execution, Job } from "../src/core/types";
 const STATUS_KEY = "pi-cron-jobs";
 const POLL_MS = 5000;
 
+function fmtLocal(iso: string): string {
+	const d = new Date(iso);
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 function isFailed(e: Execution | undefined): boolean {
 	return !!e && (e.status === "failure" || e.status === "timeout");
 }
@@ -101,14 +107,14 @@ function jobLabel(job: Job, last: Execution | undefined): string {
 	const status = last ? last.status : "never run";
 	const flag = isFailed(last) ? " ⚠" : "";
 	const sched =
-		job.schedule.kind === "cron" ? job.schedule.expr : `@ ${job.schedule.at}`;
+		job.schedule.kind === "cron" ? job.schedule.expr : `@ ${fmtLocal(job.schedule.at)}`;
 	return `${job.name} [${sched}] — ${status}${flag}`;
 }
 
 function execLabel(e: Execution): string {
 	const reason = e.reason ? ` — ${e.reason}` : "";
 	const warn = e.warning ? " ⚠" : "";
-	return `${e.startedAt}  ${e.status}${warn}${reason}`;
+	return `${fmtLocal(e.startedAt)}  ${e.status}${warn}${reason}`;
 }
 
 async function openJobsMenu(ctx: any): Promise<void> {

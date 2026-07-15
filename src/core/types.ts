@@ -35,6 +35,7 @@ export interface Job {
 	isolate?: boolean; // true => --no-extensions
 	tools?: string[] | null; // optional --tools allowlist
 	excludeTools?: string[] | null; // optional --exclude-tools denylist
+	flags?: string[] | null;       // extra CLI flags passed verbatim to the pi invocation (e.g. ["--loadout", "withBrowser"])
 	enabled: boolean;
 	createdAt: string;
 	maxRuns?: number | null; // optional cap on total executions

@@ -43,6 +43,7 @@ export function buildPiArgs(job: Job, sessionId: string, now = new Date()): stri
 	if (job.tools && job.tools.length) args.push("--tools", job.tools.join(","));
 	if (job.excludeTools && job.excludeTools.length)
 		args.push("--exclude-tools", job.excludeTools.join(","));
+	if (job.flags && job.flags.length) args.push(...job.flags);
 	args.push(job.prompt);
 	return args;
 }

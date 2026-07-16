@@ -181,8 +181,10 @@ async function cmdRun(f: Flags): Promise<void> {
 	}
 	const warn = exec.warning ? " (warning)" : "";
 	console.log(`${exec.status}${warn}${exec.reason ? ` — ${exec.reason}` : ""}`);
-	console.log(`log: ${exec.logPath}`);
-	console.log(`resume: pi-cron-jobs resume ${exec.executionId}`);
+	if (exec.status !== "skipped") {
+		console.log(`log: ${exec.logPath}`);
+		console.log(`resume: pi-cron-jobs resume ${exec.executionId}`);
+	}
 }
 
 async function cmdRm(f: Flags): Promise<void> {

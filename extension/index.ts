@@ -132,16 +132,32 @@ async function openJobsMenu(ctx: any): Promise<void> {
 	await openExecutionsMenu(ctx, job);
 }
 
-async function openExecutionsMenu(ctx: any, job: Job): Promise<void> {
-	const execs = store.executionsForJob(job.id).slice().reverse(); // newest first
-	if (!execs.length) {
+const EXEC_PAGE_SIZE = 15;
+
+async function openExecutionsMenu(ctx: any, job: Job, offset = 0): Promise<void> {
+	const all = store.executionsForJob(job.id).slice().reverse(); // newest first
+	if (!all.length) {
 		ctx.ui.notify(`"${job.name}" has not run yet.`, "info");
 		return;
 	}
-	const labels = execs.map(execLabel);
-	const choice = await ctx.ui.select(`Executions of "${job.name}" (enter = resume):`, labels);
+	const pageCount = Math.ceil(all.length / EXEC_PAGE_SIZE);
+	const start = Math.min(Math.max(0, offset), (pageCount - 1) * EXEC_PAGE_SIZE);
+	const page = all.slice(start, start + EXEC_PAGE_SIZE);
+	const labels = page.map(execLabel);
+	const PREV = "↑ previous page (newer)";
+	const NEXT = "↓ next page (older)";
+	const menu = [
+		...(start > 0 ? [PREV] : []),
+		...labels,
+		...(start + EXEC_PAGE_SIZE < all.length ? [NEXT] : []),
+	];
+	const pageNum = Math.floor(start / EXEC_PAGE_SIZE) + 1;
+	const title = `Executions of "${job.name}" — page ${pageNum}/${pageCount} (enter = resume):`;
+	const choice = await ctx.ui.select(title, menu);
 	if (!choice) return;
-	const exec = execs[labels.indexOf(choice)];
+	if (choice === PREV) return openExecutionsMenu(ctx, job, start - EXEC_PAGE_SIZE);
+	if (choice === NEXT) return openExecutionsMenu(ctx, job, start + EXEC_PAGE_SIZE);
+	const exec = page[labels.indexOf(choice)];
 	if (!exec) return;
 	await resumeExecution(ctx, job, exec);
 }

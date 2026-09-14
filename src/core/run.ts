@@ -31,6 +31,8 @@ function fmtLocal(d: Date): string {
 export function buildPiArgs(job: Job, sessionId: string, now = new Date()): string[] {
 	const args = [
 		"--print",
+		"--session-dir",
+		paths.sessionsDir,
 		"--session-id",
 		sessionId,
 		"--name",

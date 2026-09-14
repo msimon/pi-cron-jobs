@@ -3,6 +3,7 @@
 // Commands: add | list | show | executions | run | rm | resume | sync | status
 //           | install-bin | help
 
+import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import * as store from "./core/store";
@@ -234,12 +235,25 @@ function cmdInstallBin(): void {
 }
 
 function cmdResume(f: Flags): void {
-	const execId = f._[0] ?? die("usage: resume <executionId>");
+	const execId = f._[0];
+	if (!execId) {
+		const piBin = process.env.PI_BIN ?? "pi";
+		const result = spawnSync(piBin, ["--session-dir", paths.sessionsDir, "--resume"], {
+			stdio: "inherit",
+		});
+		if (result.error) die(`could not launch pi: ${result.error.message}`);
+		if (result.signal) die(`pi terminated by ${result.signal}`);
+		if (result.status && result.status !== 0) process.exit(result.status);
+		return;
+	}
+
 	const exec = store.readExecutions().find((e) => e.executionId === execId);
 	if (!exec) die(`no such execution: ${execId}`);
 	const job = store.getJob(exec.jobId);
 	const cwd = job?.cwd ?? process.cwd();
-	console.log(`cd ${cwd} && pi --session ${exec.sessionId}`);
+	console.log(
+		`cd ${JSON.stringify(cwd)} && pi --session-dir ${JSON.stringify(paths.sessionsDir)} --session ${JSON.stringify(exec.sessionId)}`,
+	);
 }
 
 function usage(): void {
@@ -255,7 +269,7 @@ function usage(): void {
 			"  executions <jobId> [--json]",
 			"  run <jobId> [--json]",
 			"  rm <jobId>",
-			"  resume <executionId>      # prints the command to resume that conversation",
+			"  resume [executionId]       # open cron session picker, or print command for one execution",
 			"  sync [--json]             # reconcile launchd with jobs.json",
 			"  status [--json]           # show launchd load state per job",
 			"  install-bin               # copy the compiled binary to a stable path",

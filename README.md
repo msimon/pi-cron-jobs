@@ -101,7 +101,8 @@ pi-cron-jobs list                 # all jobs + last status
 pi-cron-jobs show <jobId>         # job detail + recent executions
 pi-cron-jobs executions <jobId>   # full run history
 pi-cron-jobs run <jobId>          # run now (also what launchd calls)
-pi-cron-jobs resume <executionId> # prints `cd <cwd> && pi --session <id>`
+pi-cron-jobs resume               # open the cron-session picker
+pi-cron-jobs resume <executionId> # print the command for one execution
 pi-cron-jobs rm <jobId>           # unschedule + delete
 pi-cron-jobs sync                 # reconcile launchd with jobs.json
 pi-cron-jobs status               # launchd load state per job

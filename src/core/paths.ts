@@ -12,6 +12,7 @@ export const executionsFile = path.join(root, "executions.jsonl");
 export const stateFile = path.join(root, "state.json");
 export const logsDir = path.join(root, "logs");
 export const launchdDir = path.join(root, "launchd");
+export const sessionsDir = path.join(root, "sessions");
 
 export function logFile(jobId: string, executionId: string): string {
 	return path.join(logsDir, jobId, `${executionId}.log`);

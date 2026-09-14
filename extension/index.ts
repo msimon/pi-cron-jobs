@@ -7,8 +7,8 @@
 // the globally-installed @earendil-works types at our project's tsc time.
 
 import { readdirSync, existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import * as paths from "../src/core/paths";
 import * as store from "../src/core/store";
 import * as launchd from "../src/scheduler/launchd";
 import type { Execution, Job } from "../src/core/types";
@@ -80,27 +80,16 @@ function notifySinceLastSeen(ctx: any): void {
 	store.writeState({ ...state, lastSeenTs: latestTs || new Date().toISOString() });
 }
 
-// Resolve the session file for a sessionId by scanning pi's sessions dir.
+// Resolve the session file for a sessionId from the cron session store.
 function findSessionFile(sessionId: string): string | null {
-	const root = path.join(os.homedir(), ".pi", "agent", "sessions");
-	if (!existsSync(root)) return null;
+	if (!existsSync(paths.sessionsDir)) return null;
 	const suffix = `_${sessionId}.jsonl`;
 	try {
-		for (const slug of readdirSync(root)) {
-			const dir = path.join(root, slug);
-			let entries: string[];
-			try {
-				entries = readdirSync(dir);
-			} catch {
-				continue;
-			}
-			const hit = entries.find((f) => f.endsWith(suffix));
-			if (hit) return path.join(dir, hit);
-		}
+		const hit = readdirSync(paths.sessionsDir).find((file) => file.endsWith(suffix));
+		return hit ? path.join(paths.sessionsDir, hit) : null;
 	} catch {
-		// ignore
+		return null;
 	}
-	return null;
 }
 
 function jobLabel(job: Job, last: Execution | undefined): string {
@@ -165,7 +154,7 @@ async function openExecutionsMenu(ctx: any, job: Job, offset = 0): Promise<void>
 async function resumeExecution(ctx: any, job: Job, exec: Execution): Promise<void> {
 	const file = findSessionFile(exec.sessionId);
 	if (!file) {
-		ctx.ui.notify(`Resume manually: cd ${job.cwd} && pi --session ${exec.sessionId}`, "info");
+		ctx.ui.notify(`Resume manually: cd ${job.cwd} && pi --session-dir ${paths.sessionsDir} --session ${exec.sessionId}`, "info");
 		return;
 	}
 	const ok = await ctx.ui.confirm(

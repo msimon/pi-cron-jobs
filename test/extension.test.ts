@@ -99,7 +99,7 @@ test("session_start notifies about failures since last seen and sets status", as
 
 	// status badge shows the failing job
 	const status = cap.status.find((s) => typeof s === "string");
-	expect(status).toContain("⏰ jobs: 1");
+	expect(status).toContain("jobs: 1");
 	expect(status).toContain("failing");
 
 	// lastSeen advanced past the newest execution

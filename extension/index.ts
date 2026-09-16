@@ -42,8 +42,8 @@ function renderStatus(ctx: any): void {
 	const last = lastExecutionByJob(store.readExecutions());
 	const active = jobs.filter((j) => j.enabled).length;
 	const failing = jobs.filter((j) => isFailed(last.get(j.id))).length;
-	const warn = failing > 0 ? ` · ${failing} failing ⚠` : "";
-	ctx.ui.setStatus(STATUS_KEY, `⏰ jobs: ${active}${warn}`);
+	const warn = failing > 0 ? ` · ${failing} failing ⚠️` : "";
+	ctx.ui.setStatus(STATUS_KEY, `jobs: ${active}${warn}`);
 }
 
 // One-line "what happened while you were away" notice at session_start.

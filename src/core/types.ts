@@ -57,4 +57,5 @@ export interface Execution {
 
 export interface AppState {
 	lastSeenTs?: string; // ISO of the most recent execution the extension has shown
+	ignoredExecutionIds?: string[]; // executions acknowledged by hand; excluded from failure counts
 }

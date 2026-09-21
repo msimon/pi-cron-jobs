@@ -110,6 +110,32 @@ export function writeState(state: AppState): void {
 	atomicWrite(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+// ---- ignored executions ----
+// A failed run stays the "last execution" of its job forever, so it keeps the
+// job flagged as failing until the next scheduled run. Ignoring one clears it
+// from the status badge and the session-start notice without touching the
+// append-only ledger.
+
+export function readIgnoredExecutions(): Set<string> {
+	return new Set(readState().ignoredExecutionIds ?? []);
+}
+
+export function isExecutionIgnored(executionId: string): boolean {
+	return readIgnoredExecutions().has(executionId);
+}
+
+export function setExecutionIgnored(executionId: string, ignored: boolean): void {
+	const state = readState();
+	const next = new Set(state.ignoredExecutionIds ?? []);
+	if (ignored) next.add(executionId);
+	else next.delete(executionId);
+	// Drop ids whose execution is no longer in the ledger, so this list cannot
+	// grow without bound as old runs age out.
+	const live = new Set(readExecutions().map((e) => e.executionId));
+	const pruned = [...next].filter((id) => live.has(id));
+	writeState({ ...state, ignoredExecutionIds: pruned });
+}
+
 // ---- per-job lock (overlap policy = drop) ----
 // Best-effort exclusive lock via O_EXCL lockfile. Returns a release fn, or null
 // if a run for this job is already in progress.

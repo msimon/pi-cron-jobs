@@ -130,8 +130,18 @@ steps, `*/n` supported). `* * * * *` = every minute; `0 9 * * 1-5` = weekdays 9a
 
 ## Usage (in pi)
 
-- **`/jobs`** — pick a job → see its executions → resume one (switches your pi
-  session into that conversation).
+- **`/jobs`** — pick a job → see its executions → pick one, then either
+  **Resume conversation** (switches your pi session into that conversation),
+  **Retry now** (re-runs the job in the background; you stay in the session you
+  were in), or **Ignore this failure**. The first two ask for confirmation.
+- **Ignore this failure** — only offered on a `failure`/`timeout` run. A failed
+  run stays the job's newest execution until the next scheduled run, so it keeps
+  the job flagged as failing indefinitely; ignoring it clears it from the status
+  badge and the session-start notice without touching the append-only ledger.
+  Useful when several jobs fail from one shared cause (no network on wake, say)
+  and retrying one of them is enough. Ignored runs are listed as `· ignored` and
+  can be un-ignored from the same menu; the action returns you to the execution
+  list so a batch can be cleared in one pass.
 - **`/jobs sync`** — reconcile launchd with `jobs.json`.
 - **At session start** — a one-line notice: *"⏰ 3 scheduled runs since last visit
   — 1 failed (morning-triage). /jobs"*.

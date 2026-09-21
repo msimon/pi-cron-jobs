@@ -1,5 +1,5 @@
 import { test, expect, beforeAll } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -25,6 +25,20 @@ function fakeCtx(cap: Captured) {
 	};
 }
 
+// ctx whose select() answers each prompt in order, and whose confirm() says yes.
+function scriptedCtx(cap: Captured, picks: Array<(options: string[]) => string | undefined>) {
+	let i = 0;
+	return {
+		hasUI: true,
+		ui: {
+			notify: (msg: string, level: string) => cap.notify.push([msg, level]),
+			setStatus: (_key: string, val: string | undefined) => cap.status.push(val),
+			select: async (_title: string, options: string[]) => picks[i++]?.(options),
+			confirm: async () => true,
+		},
+	};
+}
+
 function wire() {
 	const handlers: Record<string, (e: any, c: any) => any> = {};
 	const commands: Record<string, any> = {};
@@ -46,7 +60,7 @@ beforeAll(() => {
 		name: "Triage",
 		prompt: "x",
 		schedule: { kind: "cron", expr: "0 9 * * *" },
-		cwd: "/x",
+		cwd: dir,
 		threadMode: "per-execution",
 		enabled: true,
 		createdAt: "2026-01-01T00:00:00Z",
@@ -108,11 +122,130 @@ test("session_start notifies about failures since last seen and sets status", as
 	await handlers.session_shutdown!({}, fakeCtx(cap));
 });
 
+test("retry action spawns the wrapper for the job and stays in session", async () => {
+	const marker = path.join(dir, "retry-args");
+	const fakeBin = path.join(dir, "fake-pi-cron-jobs");
+	writeFileSync(fakeBin, `#!/bin/sh\nprintf '%s' "$*" > ${JSON.stringify(marker)}\n`);
+	chmodSync(fakeBin, 0o755);
+	process.env.PI_CRON_JOBS_BIN = fakeBin;
+
+	const cap: Captured = { notify: [], status: [] };
+	const { commands } = wire();
+	const ctx = scriptedCtx(cap, [
+		(options) => options[0], // the job
+		(options) => options[0], // newest execution
+		(options) => options.find((o) => o.includes("Retry")), // action menu
+	]);
+	await commands.jobs!.handler("", ctx);
+
+	expect(cap.notify.some(([msg]) => msg.includes("Retrying"))).toBe(true);
+	for (let i = 0; i < 50 && !existsSync(marker); i++)
+		await new Promise((r) => setTimeout(r, 50));
+	expect(existsSync(marker)).toBe(true);
+	expect(readFileSync(marker, "utf8").trim()).toBe("run triage");
+	delete process.env.PI_CRON_JOBS_BIN;
+});
+
 test("no double-notify when nothing new since last seen", async () => {
 	store.writeState({ lastSeenTs: "2026-06-23T09:00:00Z" });
 	const cap: Captured = { notify: [], status: [] };
 	const { handlers } = wire();
 	await handlers.session_start!({}, fakeCtx(cap));
 	expect(cap.notify.length).toBe(0);
+	await handlers.session_shutdown!({}, fakeCtx(cap));
+});
+
+test("ignoring a failed execution clears it from the badge and the notice", async () => {
+	const cap: Captured = { notify: [], status: [] };
+	const { commands } = wire();
+	const ctx = scriptedCtx(cap, [
+		(options) => options[0], // the job
+		(options) => options[0], // newest execution (e2, the failure)
+		(options) => options.find((o) => o.includes("Ignore")), // action menu
+	]);
+	await commands.jobs!.handler("", ctx);
+
+	expect(store.readState().ignoredExecutionIds).toEqual(["e2"]);
+	expect(cap.notify.some(([msg]) => msg.includes("no longer counts as failing"))).toBe(true);
+
+	// the failure no longer drives the badge or the session-start warning
+	store.writeState({ ...store.readState(), lastSeenTs: "2026-06-23T06:00:00Z" });
+	const after: Captured = { notify: [], status: [] };
+	const { handlers } = wire();
+	await handlers.session_start!({}, fakeCtx(after));
+
+	expect(after.notify.some(([msg]) => msg.includes("failed"))).toBe(false);
+	expect(after.status.find((s) => typeof s === "string")).not.toContain("failing");
+	await handlers.session_shutdown!({}, fakeCtx(after));
+});
+
+test("un-ignoring a failed execution brings the warning back", async () => {
+	const cap: Captured = { notify: [], status: [] };
+	const { commands } = wire();
+	const ctx = scriptedCtx(cap, [
+		(options) => options[0],
+		(options) => options.find((o) => o.includes("ignored")), // labelled as ignored
+		(options) => options.find((o) => o.includes("Stop ignoring")),
+	]);
+	await commands.jobs!.handler("", ctx);
+
+	expect(store.readState().ignoredExecutionIds).toEqual([]);
+
+	store.writeState({ ...store.readState(), lastSeenTs: "2026-06-23T06:00:00Z" });
+	const after: Captured = { notify: [], status: [] };
+	const { handlers } = wire();
+	await handlers.session_start!({}, fakeCtx(after));
+	expect(after.notify.some(([msg]) => msg.includes("failed"))).toBe(true);
+	await handlers.session_shutdown!({}, fakeCtx(after));
+});
+
+test("session_start warns about dark-wake skips alongside failures", async () => {
+	store.appendExecution({
+		jobId: "triage",
+		executionId: "e3",
+		sessionId: "triage__e3",
+		startedAt: "2026-06-24T07:00:00Z",
+		endedAt: "2026-06-24T07:00:01Z",
+		exitCode: null,
+		status: "skipped",
+		reason: "dark wake — last sleep: Maintenance Sleep",
+		warning: false,
+		logPath: "x",
+	});
+	store.writeState({ lastSeenTs: "2026-06-24T06:00:00Z" });
+
+	const cap: Captured = { notify: [], status: [] };
+	const { handlers } = wire();
+	await handlers.session_start!({}, fakeCtx(cap));
+
+	expect(cap.notify.length).toBe(1);
+	const [msg, level] = cap.notify[0]!;
+	expect(level).toBe("warning");
+	expect(msg).toContain("skipped, Mac was asleep");
+	expect(msg).toContain("triage");
+	await handlers.session_shutdown!({}, fakeCtx(cap));
+});
+
+test("an ordinary skip does not raise a warning", async () => {
+	store.appendExecution({
+		jobId: "triage",
+		executionId: "e4",
+		sessionId: "triage__e4",
+		startedAt: "2026-06-25T07:00:00Z",
+		endedAt: "2026-06-25T07:00:01Z",
+		exitCode: null,
+		status: "skipped",
+		reason: "job disabled",
+		warning: false,
+		logPath: "x",
+	});
+	store.writeState({ lastSeenTs: "2026-06-25T06:00:00Z" });
+
+	const cap: Captured = { notify: [], status: [] };
+	const { handlers } = wire();
+	await handlers.session_start!({}, fakeCtx(cap));
+
+	expect(cap.notify[0]![1]).toBe("info");
+	expect(cap.notify[0]![0]).toContain("all ok");
 	await handlers.session_shutdown!({}, fakeCtx(cap));
 });

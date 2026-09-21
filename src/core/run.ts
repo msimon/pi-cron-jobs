@@ -10,6 +10,7 @@ import * as paths from "./paths";
 import { newExecutionId, sessionIdFor } from "./ids";
 import { markerInstruction, parseMarker } from "./marker";
 import type { Execution, ExecutionStatus, Job } from "./types";
+import { DARK_WAKE_REASON_PREFIX, detectWakeState } from "./darkwake";
 
 export interface RunOptions {
 	piBin?: string; // path to the pi executable (default: env PI_BIN or "pi")
@@ -190,6 +191,17 @@ export async function runJob(
 		return finalize(job, executionId, sessionId, logPath, now, {
 			status: "skipped",
 			reason: `maxRuns (${job.maxRuns}) reached`,
+		});
+	}
+
+	// A job launched inside a DarkWake maintenance window cannot finish: macOS
+	// returns to sleep ~45s later and the wall-clock timeout kills it. Record it
+	// as skipped rather than burning the slot and reporting a false failure.
+	const wake = detectWakeState();
+	if (wake.darkWake) {
+		return finalize(job, executionId, sessionId, logPath, now, {
+			status: "skipped",
+			reason: `${DARK_WAKE_REASON_PREFIX} — ${wake.detail}`,
 		});
 	}
 

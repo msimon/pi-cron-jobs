@@ -50,6 +50,13 @@ export function buildPiArgs(job: Job, sessionId: string, now = new Date()): stri
 	return args;
 }
 
+// `pi --print` only flushes stdout when the turn completes, so a run that wedges
+// mid-turn is killed having written nothing but the header -- 33 of 34 timeouts
+// in the ledger are blank. These heartbeat lines are cheap and make the
+// difference between "never started", "started and went quiet", and "still
+// talking when we killed it" readable after the fact.
+const HEARTBEAT_MS = 60_000;
+
 function spawnPi(
 	piBin: string,
 	args: string[],
@@ -59,35 +66,69 @@ function spawnPi(
 ): Promise<SpawnResult> {
 	return new Promise((resolve) => {
 		const log = createWriteStream(logPath, { flags: "a" });
+		const startedAt = Date.now();
+		const stamp = () => `+${Math.round((Date.now() - startedAt) / 1000)}s`;
+		const idleSecs = () => Math.round((Date.now() - lastOutputAt) / 1000);
+
 		log.write(`# pi-cron-jobs execution\n# ${new Date().toISOString()}\n`);
 		log.write(`# cwd: ${cwd}\n# cmd: ${piBin} ${args.map(shellQuote).join(" ")}\n\n`);
 
 		let stdout = "";
 		let timedOut = false;
+		let stdoutBytes = 0;
+		let stderrBytes = 0;
+		let lastOutputAt = Date.now();
+
 		const child = spawn(piBin, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+
+		const heartbeat = setInterval(() => {
+			log.write(
+				`# ${stamp()} alive pid=${child.pid ?? "?"} stdout=${stdoutBytes}B ` +
+					`stderr=${stderrBytes}B idle=${idleSecs()}s\n`,
+			);
+		}, HEARTBEAT_MS);
+		heartbeat.unref?.();
 
 		const timer = setTimeout(() => {
 			timedOut = true;
+			log.write(
+				`\n# ${stamp()} TIMEOUT after ${timeoutMs}ms — sending SIGTERM ` +
+					`(stdout=${stdoutBytes}B stderr=${stderrBytes}B, last output ${idleSecs()}s ago)\n`,
+			);
 			child.kill("SIGTERM");
 			setTimeout(() => child.kill("SIGKILL"), 5000).unref();
 		}, timeoutMs);
 
+		const stopTimers = () => {
+			clearTimeout(timer);
+			clearInterval(heartbeat);
+		};
+
 		child.stdout.on("data", (chunk: Buffer) => {
 			stdout += chunk.toString();
+			stdoutBytes += chunk.length;
+			lastOutputAt = Date.now();
 			log.write(chunk);
 		});
-		child.stderr.on("data", (chunk: Buffer) => log.write(chunk));
+		child.stderr.on("data", (chunk: Buffer) => {
+			stderrBytes += chunk.length;
+			lastOutputAt = Date.now();
+			log.write(chunk);
+		});
 
 		child.on("error", (err) => {
-			clearTimeout(timer);
-			log.write(`\n# spawn error: ${String(err)}\n`);
+			stopTimers();
+			log.write(`\n# ${stamp()} spawn error: ${String(err)}\n`);
 			log.end();
 			resolve({ exitCode: 127, signal: null, timedOut, stdout });
 		});
 
 		child.on("close", (code, signal) => {
-			clearTimeout(timer);
-			log.write(`\n# exit code: ${code} signal: ${signal ?? "none"}\n`);
+			stopTimers();
+			log.write(
+				`\n# ${stamp()} exit code: ${code} signal: ${signal ?? "none"} ` +
+					`stdout=${stdoutBytes}B stderr=${stderrBytes}B\n`,
+			);
 			log.end();
 			resolve({ exitCode: code, signal, timedOut, stdout });
 		});

@@ -64,6 +64,7 @@ function spawnPi(
 	cwd: string,
 	logPath: string,
 	timeoutMs: number,
+	wakeDetail: string,
 ): Promise<SpawnResult> {
 	return new Promise((resolve) => {
 		const log = createWriteStream(logPath, { flags: "a" });
@@ -72,7 +73,7 @@ function spawnPi(
 		const idleSecs = () => Math.round((Date.now() - lastOutputAt) / 1000);
 
 		log.write(`# pi-cron-jobs execution\n# ${new Date().toISOString()}\n`);
-		log.write(`# cwd: ${cwd}\n# cmd: ${piBin} ${args.map(shellQuote).join(" ")}\n\n`);
+		log.write(`# cwd: ${cwd}\n# wake: ${wakeDetail}\n# cmd: ${piBin} ${args.map(shellQuote).join(" ")}\n\n`);
 
 		let stdout = "";
 		let timedOut = false;
@@ -218,7 +219,7 @@ export async function runJob(
 		mkdirSync(path.dirname(logPath), { recursive: true });
 		const piBin = opts.piBin ?? process.env.PI_BIN ?? "pi";
 		const args = buildPiArgs(job, sessionId, now);
-		const result = await spawnPi(piBin, args, job.cwd, logPath, job.timeoutMs);
+		const result = await spawnPi(piBin, args, job.cwd, logPath, job.timeoutMs, wake.detail);
 		const marker = parseMarker(result.stdout);
 
 		let status: ExecutionStatus;

@@ -7,9 +7,16 @@
 // keeps running, so it is killed having done almost nothing. Those runs are not
 // failures -- the machine was asleep -- so we record them as `skipped`.
 //
-// `IOPMUserTriggeredFullWake` on IOPMrootDomain is the signal: "Yes" on a real
-// user wake, "No" in DarkWake. `ioreg` returns in milliseconds, unlike
-// `pmset -g log` which has to parse days of history.
+// The signal is IOPMrootDomain's "System Capabilities", the live capability
+// mask: CPU 0x1, Graphics 0x2, Audio 0x4, Network 0x8. A full wake has
+// Graphics, a DarkWake does not (pmset logs them as [CDNVA] vs [CDNP]).
+// `ioreg` returns in milliseconds, unlike `pmset -g log` which has to parse
+// days of history.
+//
+// `IOPMUserTriggeredFullWake` is deliberately NOT used: it describes how the
+// last full wake started and is sticky across later DarkWakes. It let DarkWake
+// launches through (stale "Yes") and blocked runs while the Mac was fully awake
+// and in use ("No", 2026-10-07).
 //
 // Every failure path here fails OPEN (treat as a normal wake and run the job):
 // wrongly skipping a run is worse than wrongly running one.
@@ -23,21 +30,24 @@ export interface WakeState {
 	detail: string;
 }
 
+const CAP_GRAPHICS = 0x2;
+
 // Pure so it can be tested against captured ioreg output.
 export function parseWakeState(ioregOutput: string): WakeState {
-	const full = /"IOPMUserTriggeredFullWake"\s*=\s*(Yes|No)/.exec(ioregOutput);
-	if (!full) {
-		// Key missing (older/newer macOS, or not a laptop): assume a real wake.
-		return { darkWake: false, detail: "IOPMUserTriggeredFullWake not reported" };
+	const m = /"System Capabilities"\s*=\s*(\d+)/.exec(ioregOutput);
+	if (!m) {
+		// Key missing (older/newer macOS): assume a real wake.
+		return { darkWake: false, detail: "System Capabilities not reported" };
 	}
-	if (full[1] === "Yes") {
-		const type = /"Wake Type"\s*=\s*"([^"]*)"/.exec(ioregOutput)?.[1];
-		return { darkWake: false, detail: type ? `full wake (${type})` : "full wake" };
+	const caps = Number(m[1]);
+	const hex = `0x${caps.toString(16)}`;
+	if (caps & CAP_GRAPHICS) {
+		return { darkWake: false, detail: `full wake (capabilities ${hex})` };
 	}
 	const lastSleep = /"Last Sleep Reason"\s*=\s*"([^"]*)"/.exec(ioregOutput)?.[1];
 	return {
 		darkWake: true,
-		detail: lastSleep ? `last sleep: ${lastSleep}` : "no user-triggered full wake",
+		detail: `capabilities ${hex}, no graphics${lastSleep ? `; last sleep: ${lastSleep}` : ""}`,
 	};
 }
 

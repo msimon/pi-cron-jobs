@@ -1,5 +1,5 @@
 import { test, expect, beforeAll } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -10,6 +10,7 @@ process.env.PI_CRON_JOBS_DIR = dir;
 // dynamic imports so the env is set first
 const store = await import("../src/core/store");
 const extMod = await import("../extension/index");
+const paths = await import("../src/core/paths");
 
 type Captured = { notify: Array<[string, string]>; status: Array<string | undefined> };
 
@@ -248,4 +249,37 @@ test("an ordinary skip does not raise a warning", async () => {
 	expect(cap.notify[0]![1]).toBe("info");
 	expect(cap.notify[0]![0]).toContain("all ok");
 	await handlers.session_shutdown!({}, fakeCtx(cap));
+});
+
+// Menu options offered for one execution, picked by its label.
+async function actionMenuFor(execMatch: (label: string) => boolean): Promise<string[]> {
+	let seen: string[] = [];
+	const cap: Captured = { notify: [], status: [] };
+	const { commands } = wire();
+	const ctx = scriptedCtx(cap, [
+		(options) => options[0], // the job
+		(options) => options.find(execMatch),
+		(options) => {
+			seen = options;
+			return undefined; // close the menu
+		},
+	]);
+	await commands.jobs!.handler("", ctx);
+	return seen;
+}
+
+test("a run with no saved conversation shows a note instead of Resume", async () => {
+	// e4 ("job disabled" skip) is the newest execution and never wrote a session.
+	const options = await actionMenuFor((label) => label.includes("skipped"));
+	expect(options.some((o) => o.includes("No conversation to resume"))).toBe(true);
+	expect(options.some((o) => o.includes("Resume conversation"))).toBe(false);
+	expect(options.some((o) => o.includes("Retry"))).toBe(true);
+});
+
+test("a run with a saved conversation offers Resume", async () => {
+	mkdirSync(paths.sessionsDir, { recursive: true });
+	writeFileSync(path.join(paths.sessionsDir, "2026-06-23T07-00-00-000Z_triage__e1.jsonl"), "");
+	const options = await actionMenuFor((label) => label.includes("success"));
+	expect(options.some((o) => o.includes("Resume conversation"))).toBe(true);
+	expect(options.some((o) => o.includes("No conversation"))).toBe(false);
 });

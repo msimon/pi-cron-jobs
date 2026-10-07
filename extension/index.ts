@@ -182,7 +182,10 @@ async function openExecutionsMenu(ctx: any, job: Job, offset = 0): Promise<void>
 }
 
 const ACTION_RESUME = "↩ Resume conversation";
-const ACTION_RETRY = "⟳ Retry now";
+const ACTION_RETRY = "⟳  Retry now";
+// Shown instead of ACTION_RESUME when the run saved no conversation (skipped
+// runs: dark wake, disabled, overlap, maxRuns). Inert: picking it re-shows the menu.
+const NO_CONVERSATION = "∅ No conversation to resume";
 const ACTION_IGNORE = "⊘ Ignore this failure";
 const ACTION_UNIGNORE = "⊙ Stop ignoring this failure";
 
@@ -200,7 +203,8 @@ async function openExecutionActions(
 	// will keep mentioning it until it is acknowledged.
 	const failed =
 		exec.status === "failure" || exec.status === "timeout" || isDarkWakeSkip(exec);
-	const menu = [ACTION_RESUME, ACTION_RETRY];
+	const hasConversation = findSessionFile(exec.sessionId) !== null;
+	const menu = [hasConversation ? ACTION_RESUME : NO_CONVERSATION, ACTION_RETRY];
 	if (isIgnored) menu.push(ACTION_UNIGNORE);
 	else if (failed) menu.push(ACTION_IGNORE);
 
@@ -208,6 +212,7 @@ async function openExecutionActions(
 	const title = `${job.name} · ${fmtLocal(exec.startedAt)} · ${exec.status}${suffix}:`;
 	const choice = await ctx.ui.select(title, menu);
 	if (!choice) return;
+	if (choice === NO_CONVERSATION) return openExecutionActions(ctx, job, exec, offset);
 	if (choice === ACTION_RETRY) return retryJob(ctx, job);
 	if (choice === ACTION_IGNORE || choice === ACTION_UNIGNORE) {
 		store.setExecutionIgnored(exec.executionId, choice === ACTION_IGNORE);
@@ -275,7 +280,7 @@ async function retryJob(ctx: any, job: Job): Promise<void> {
 async function resumeExecution(ctx: any, job: Job, exec: Execution): Promise<void> {
 	const file = findSessionFile(exec.sessionId);
 	if (!file) {
-		ctx.ui.notify(`Resume manually: cd ${job.cwd} && pi --session-dir ${paths.sessionsDir} --session ${exec.sessionId}`, "info");
+		ctx.ui.notify("No conversation was saved for this run.", "info");
 		return;
 	}
 	const ok = await ctx.ui.confirm(

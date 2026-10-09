@@ -145,7 +145,7 @@ steps, `*/n` supported). `* * * * *` = every minute; `0 9 * * 1-5` = weekdays 9a
 - **`/jobs sync`** — reconcile launchd with `jobs.json`.
 - **At session start** — a one-line notice: *"⏰ 3 scheduled runs since last visit
   — 1 failed (morning-triage). /jobs"*.
-- **Status line** — always-on badge `⏰ jobs: 5 · 1 failing ⚠`.
+- **Status line** — always-on badge `cron: 5 · 1 failing ⚠️`.
 
 ## Development
 

@@ -227,6 +227,31 @@ test("session_start warns about dark-wake skips alongside failures", async () =>
 	await handlers.session_shutdown!({}, fakeCtx(cap));
 });
 
+test("session_start warns about offline skips", async () => {
+	store.appendExecution({
+		jobId: "triage",
+		executionId: "e3b",
+		sessionId: "triage__e3b",
+		startedAt: "2026-06-24T09:00:00Z",
+		endedAt: "2026-06-24T09:01:30Z",
+		exitCode: null,
+		status: "skipped",
+		reason: "offline — api.anthropic.com:443 unreachable for 90s",
+		warning: false,
+		logPath: "x",
+	});
+	store.writeState({ lastSeenTs: "2026-06-24T08:00:00Z" });
+
+	const cap: Captured = { notify: [], status: [] };
+	const { handlers } = wire();
+	await handlers.session_start!({}, fakeCtx(cap));
+
+	const [msg, level] = cap.notify[0]!;
+	expect(level).toBe("warning");
+	expect(msg).toContain("skipped, no network");
+	await handlers.session_shutdown!({}, fakeCtx(cap));
+});
+
 test("an ordinary skip does not raise a warning", async () => {
 	store.appendExecution({
 		jobId: "triage",

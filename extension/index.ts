@@ -13,7 +13,7 @@ import * as paths from "../src/core/paths";
 import * as store from "../src/core/store";
 import * as launchd from "../src/scheduler/launchd";
 import type { Execution, Job } from "../src/core/types";
-import { DARK_WAKE_REASON_PREFIX } from "../src/core/darkwake";
+import { interruptKind } from "../src/core/outcome";
 
 const STATUS_KEY = "pi-cron-jobs";
 const POLL_MS = 5000;
@@ -33,13 +33,11 @@ function isFailed(e: Execution | undefined, ignored?: Set<string>): boolean {
 	return !ignored?.has(e.executionId);
 }
 
-// A run the wrapper declined to start because macOS was in a DarkWake
-// maintenance window. Not a failure -- the machine was asleep -- but worth
-// surfacing, since the job did not run at all.
-function isDarkWakeSkip(e: Execution | undefined): boolean {
-	return (
-		!!e && e.status === "skipped" && (e.reason ?? "").startsWith(DARK_WAKE_REASON_PREFIX)
-	);
+// A run that did not happen because of the machine, not the job: a DarkWake,
+// sleeping mid-run, or no network. Not a failure, but worth surfacing (and
+// retrying), since the job did not do its work.
+function isInterruptedSkip(e: Execution | undefined): boolean {
+	return interruptKind(e) !== null;
 }
 
 function lastExecutionByJob(execs: Execution[]): Map<string, Execution> {
@@ -84,14 +82,16 @@ function notifySinceLastSeen(ctx: any): void {
 		if (fresh.length) {
 			const jobNames = (list: Execution[]) => [...new Set(list.map((e) => e.jobId))].join(", ");
 			const fails = fresh.filter((e) => isFailed(e, ignored));
-			const darkSkips = fresh.filter(
-				(e) => isDarkWakeSkip(e) && !ignored.has(e.executionId),
-			);
+			const unseen = fresh.filter((e) => !ignored.has(e.executionId));
+			const asleep = unseen.filter((e) => interruptKind(e) === "asleep");
+			const offline = unseen.filter((e) => interruptKind(e) === "offline");
 
 			const parts: string[] = [];
 			if (fails.length) parts.push(`${fails.length} failed (${jobNames(fails)})`);
-			if (darkSkips.length)
-				parts.push(`${darkSkips.length} skipped, Mac was asleep (${jobNames(darkSkips)})`);
+			if (asleep.length)
+				parts.push(`${asleep.length} skipped, Mac was asleep (${jobNames(asleep)})`);
+			if (offline.length)
+				parts.push(`${offline.length} skipped, no network (${jobNames(offline)})`);
 
 			if (parts.length) {
 				ctx.ui.notify(
@@ -199,10 +199,10 @@ async function openExecutionActions(
 ): Promise<void> {
 	const ignored = store.readIgnoredExecutions();
 	const isIgnored = ignored.has(exec.executionId);
-	// Dark-wake skips are dismissible too: the job did not run, and the notice
+	// Interrupted skips are dismissible too: the job did not run, and the notice
 	// will keep mentioning it until it is acknowledged.
 	const failed =
-		exec.status === "failure" || exec.status === "timeout" || isDarkWakeSkip(exec);
+		exec.status === "failure" || exec.status === "timeout" || isInterruptedSkip(exec);
 	const hasConversation = findSessionFile(exec.sessionId) !== null;
 	const menu = [hasConversation ? ACTION_RESUME : NO_CONVERSATION, ACTION_RETRY];
 	if (isIgnored) menu.push(ACTION_UNIGNORE);

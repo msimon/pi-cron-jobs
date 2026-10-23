@@ -10,11 +10,16 @@ import * as paths from "./paths";
 import { newExecutionId, sessionIdFor } from "./ids";
 import { markerInstruction, parseMarker } from "./marker";
 import type { Execution, ExecutionStatus, Job } from "./types";
-import { DARK_WAKE_REASON_PREFIX, detectWakeState } from "./darkwake";
+import { DARK_WAKE_REASON_PREFIX, detectWakeState, type WakeState } from "./darkwake";
+import { waitForNetwork, type NetState } from "./network";
+import { OFFLINE_REASON_PREFIX, classifyStderr } from "./outcome";
 
 export interface RunOptions {
 	piBin?: string; // path to the pi executable (default: env PI_BIN or "pi")
 	now?: Date;
+	// Injectable for tests; default to the real macOS / network probes.
+	wakeCheck?: () => WakeState;
+	networkCheck?: () => Promise<NetState>;
 }
 
 interface SpawnResult {
@@ -22,7 +27,11 @@ interface SpawnResult {
 	signal: NodeJS.Signals | null;
 	timedOut: boolean;
 	stdout: string;
+	stderr: string; // tail only, see STDERR_KEEP
 }
+
+// Enough to classify the failure (network/auth errors print early and short).
+const STDERR_KEEP = 64 * 1024;
 
 function fmtLocal(d: Date): string {
 	const p = (n: number) => String(n).padStart(2, "0");
@@ -64,7 +73,7 @@ function spawnPi(
 	cwd: string,
 	logPath: string,
 	timeoutMs: number,
-	wakeDetail: string,
+	notes: Array<[string, string]>,
 ): Promise<SpawnResult> {
 	return new Promise((resolve) => {
 		const log = createWriteStream(logPath, { flags: "a" });
@@ -73,9 +82,11 @@ function spawnPi(
 		const idleSecs = () => Math.round((Date.now() - lastOutputAt) / 1000);
 
 		log.write(`# pi-cron-jobs execution\n# ${new Date().toISOString()}\n`);
-		log.write(`# cwd: ${cwd}\n# wake: ${wakeDetail}\n# cmd: ${piBin} ${args.map(shellQuote).join(" ")}\n\n`);
+		const noteLines = notes.map(([k, v]) => `# ${k}: ${v}\n`).join("");
+		log.write(`# cwd: ${cwd}\n${noteLines}# cmd: ${piBin} ${args.map(shellQuote).join(" ")}\n\n`);
 
 		let stdout = "";
+		let stderr = "";
 		let timedOut = false;
 		let stdoutBytes = 0;
 		let stderrBytes = 0;
@@ -113,6 +124,8 @@ function spawnPi(
 			log.write(chunk);
 		});
 		child.stderr.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString();
+			if (stderr.length > STDERR_KEEP) stderr = stderr.slice(-STDERR_KEEP);
 			stderrBytes += chunk.length;
 			lastOutputAt = Date.now();
 			log.write(chunk);
@@ -122,7 +135,7 @@ function spawnPi(
 			stopTimers();
 			log.write(`\n# ${stamp()} spawn error: ${String(err)}\n`);
 			log.end();
-			resolve({ exitCode: 127, signal: null, timedOut, stdout });
+			resolve({ exitCode: 127, signal: null, timedOut, stdout, stderr });
 		});
 
 		child.on("close", (code, signal) => {
@@ -132,7 +145,7 @@ function spawnPi(
 					`stdout=${stdoutBytes}B stderr=${stderrBytes}B\n`,
 			);
 			log.end();
-			resolve({ exitCode: code, signal, timedOut, stdout });
+			resolve({ exitCode: code, signal, timedOut, stdout, stderr });
 		});
 	});
 }
@@ -198,11 +211,21 @@ export async function runJob(
 	// A job launched inside a DarkWake maintenance window cannot finish: macOS
 	// returns to sleep ~45s later and the wall-clock timeout kills it. Record it
 	// as skipped rather than burning the slot and reporting a false failure.
-	const wake = detectWakeState();
+	const wake = (opts.wakeCheck ?? detectWakeState)();
 	if (wake.darkWake) {
 		return finalize(job, executionId, sessionId, logPath, now, {
 			status: "skipped",
 			reason: `${DARK_WAKE_REASON_PREFIX} — ${wake.detail}`,
+		});
+	}
+
+	// Right after a wake the network is often not back yet; pi would die on its
+	// first request. Wait for it, and skip (not fail) if it never comes.
+	const netState = await (opts.networkCheck ?? (() => waitForNetwork()))();
+	if (!netState.online) {
+		return finalize(job, executionId, sessionId, logPath, now, {
+			status: "skipped",
+			reason: `${OFFLINE_REASON_PREFIX} — ${netState.detail}`,
 		});
 	}
 
@@ -219,7 +242,10 @@ export async function runJob(
 		mkdirSync(path.dirname(logPath), { recursive: true });
 		const piBin = opts.piBin ?? process.env.PI_BIN ?? "pi";
 		const args = buildPiArgs(job, sessionId, now);
-		const result = await spawnPi(piBin, args, job.cwd, logPath, job.timeoutMs, wake.detail);
+		const result = await spawnPi(piBin, args, job.cwd, logPath, job.timeoutMs, [
+			["wake", wake.detail],
+			["network", netState.detail],
+		]);
 		const marker = parseMarker(result.stdout);
 
 		let status: ExecutionStatus;
@@ -234,8 +260,19 @@ export async function runJob(
 			reason = marker.reason;
 			if (marker.status === "success" && result.exitCode !== 0) warning = true;
 		} else if (result.exitCode !== 0) {
-			status = "failure";
-			reason = `exited ${result.exitCode} with no status marker`;
+			// No marker: pi died before the agent finished. Tell a lost network
+			// (not the job's fault -> skipped) from a broken login (real failure).
+			const cls = classifyStderr(result.stderr);
+			if (cls?.kind === "offline") {
+				status = "skipped";
+				reason = `${OFFLINE_REASON_PREFIX} — ${cls.detail} (exited ${result.exitCode})`;
+			} else if (cls?.kind === "auth") {
+				status = "failure";
+				reason = cls.detail;
+			} else {
+				status = "failure";
+				reason = `exited ${result.exitCode} with no status marker`;
+			}
 		} else {
 			// clean exit but agent never emitted a marker
 			status = "success";

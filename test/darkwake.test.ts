@@ -1,5 +1,17 @@
 import { test, expect } from "bun:test";
-import { parseWakeState, DARK_WAKE_REASON_PREFIX } from "../src/core/darkwake";
+import { existsSync } from "node:fs";
+import { parseWakeState, DARK_WAKE_REASON_PREFIX, IOREG_BIN } from "../src/core/darkwake";
+import { resolvePathEnv } from "../src/scheduler/launchd";
+
+// launchd's PATH has no /usr/sbin; a bare "ioreg" silently disabled detection.
+test("ioreg is called by absolute path", () => {
+	expect(IOREG_BIN.startsWith("/")).toBe(true);
+	if (process.platform === "darwin") expect(existsSync(IOREG_BIN)).toBe(true);
+});
+
+test("launchd PATH includes /usr/sbin for system tools", () => {
+	expect(resolvePathEnv().split(":")).toContain("/usr/sbin");
+});
 
 // Real `ioreg -n IOPMrootDomain -r -d 1` output, 2026-10-07 11:19, Mac fully
 // awake and in use. IOPMUserTriggeredFullWake reads "No" here, which made the

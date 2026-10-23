@@ -55,13 +55,15 @@ export function resolveBinPath(): string {
 }
 
 // PATH the spawned `pi` (nvm `#!/usr/bin/env node` shim) needs to find node.
+// /usr/sbin and /sbin carry system tools (ioreg, scutil) that launchd's default
+// environment does not expose.
 export function resolvePathEnv(): string {
 	const dirs = new Set<string>();
 	for (const cmd of ["pi", "node", "bun"]) {
 		const p = which(cmd);
 		if (p) dirs.add(path.dirname(p));
 	}
-	for (const d of ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"])
+	for (const d of ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
 		dirs.add(d);
 	return [...dirs].join(":");
 }

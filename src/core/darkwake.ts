@@ -51,12 +51,17 @@ export function parseWakeState(ioregOutput: string): WakeState {
 	};
 }
 
+// Absolute path: launchd's PATH has no /usr/sbin, and a bare "ioreg" failed
+// with "Executable not found in $PATH" on every scheduled run until 2026-10-23,
+// which (failing open) silently disabled DarkWake detection.
+export const IOREG_BIN = "/usr/sbin/ioreg";
+
 export function detectWakeState(): WakeState {
 	if (process.platform !== "darwin") {
 		return { darkWake: false, detail: "not macOS" };
 	}
 	try {
-		const out = execFileSync("ioreg", ["-n", "IOPMrootDomain", "-r", "-d", "1"], {
+		const out = execFileSync(IOREG_BIN, ["-n", "IOPMrootDomain", "-r", "-d", "1"], {
 			encoding: "utf8",
 			timeout: 5000,
 		});

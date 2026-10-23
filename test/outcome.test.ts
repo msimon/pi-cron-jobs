@@ -129,3 +129,9 @@ test("marker still wins over stderr noise", () => {
 	const e = drive({ PI_BODY: "echo 'Connection error.' >&2; echo 'PI_JOB_STATUS: success'; exit 0" });
 	expect(e.status).toBe("success");
 });
+
+test("a hung run is still killed by the (awake-time) timeout", () => {
+	const e = drive({ DRIVER_TIMEOUT_MS: "300", PI_BODY: "exec sleep 10" });
+	expect(e.status).toBe("timeout");
+	expect(e.reason).toContain("300ms");
+});

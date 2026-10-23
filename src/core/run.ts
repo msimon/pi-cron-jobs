@@ -12,7 +12,8 @@ import { markerInstruction, parseMarker } from "./marker";
 import type { Execution, ExecutionStatus, Job } from "./types";
 import { DARK_WAKE_REASON_PREFIX, detectWakeState, type WakeState } from "./darkwake";
 import { waitForNetwork, type NetState } from "./network";
-import { OFFLINE_REASON_PREFIX, classifyStderr } from "./outcome";
+import { OFFLINE_REASON_PREFIX, SLEPT_REASON_PREFIX, classifyStderr } from "./outcome";
+import { AwakeClock, TICK_MS, fmtDuration } from "./sleep";
 
 export interface RunOptions {
 	piBin?: string; // path to the pi executable (default: env PI_BIN or "pi")
@@ -28,6 +29,7 @@ interface SpawnResult {
 	timedOut: boolean;
 	stdout: string;
 	stderr: string; // tail only, see STDERR_KEEP
+	sleptMs: number; // time the Mac spent asleep during the run
 }
 
 // Enough to classify the failure (network/auth errors print early and short).
@@ -94,28 +96,40 @@ function spawnPi(
 
 		const child = spawn(piBin, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
 
-		const heartbeat = setInterval(() => {
-			log.write(
-				`# ${stamp()} alive pid=${child.pid ?? "?"} stdout=${stdoutBytes}B ` +
-					`stderr=${stderrBytes}B idle=${idleSecs()}s\n`,
-			);
-		}, HEARTBEAT_MS);
-		heartbeat.unref?.();
+		// One short ticker drives the heartbeat, sleep detection and the timeout.
+		// The timeout counts awake time only: a run the Mac slept through is not
+		// killed the instant it wakes up (see sleep.ts).
+		const clock = new AwakeClock(startedAt);
+		let lastHeartbeat = startedAt;
+		const ticker = setInterval(() => {
+			const now = Date.now();
+			const nap = clock.tick(now);
+			if (nap > 0) {
+				log.write(
+					`# ${stamp()} woke up after ~${fmtDuration(nap)} asleep ` +
+						`(awake ${fmtDuration(clock.awakeMs(now))} of ${fmtDuration(timeoutMs)})\n`,
+				);
+			}
+			if (now - lastHeartbeat >= HEARTBEAT_MS) {
+				lastHeartbeat = now;
+				log.write(
+					`# ${stamp()} alive pid=${child.pid ?? "?"} stdout=${stdoutBytes}B ` +
+						`stderr=${stderrBytes}B idle=${idleSecs()}s\n`,
+				);
+			}
+			if (!timedOut && clock.awakeMs(now) >= timeoutMs) {
+				timedOut = true;
+				log.write(
+					`\n# ${stamp()} TIMEOUT after ${timeoutMs}ms awake — sending SIGTERM ` +
+						`(stdout=${stdoutBytes}B stderr=${stderrBytes}B, last output ${idleSecs()}s ago)\n`,
+				);
+				child.kill("SIGTERM");
+				setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+			}
+		}, Math.min(TICK_MS, timeoutMs));
+		ticker.unref?.();
 
-		const timer = setTimeout(() => {
-			timedOut = true;
-			log.write(
-				`\n# ${stamp()} TIMEOUT after ${timeoutMs}ms — sending SIGTERM ` +
-					`(stdout=${stdoutBytes}B stderr=${stderrBytes}B, last output ${idleSecs()}s ago)\n`,
-			);
-			child.kill("SIGTERM");
-			setTimeout(() => child.kill("SIGKILL"), 5000).unref();
-		}, timeoutMs);
-
-		const stopTimers = () => {
-			clearTimeout(timer);
-			clearInterval(heartbeat);
-		};
+		const stopTimers = () => clearInterval(ticker);
 
 		child.stdout.on("data", (chunk: Buffer) => {
 			stdout += chunk.toString();
@@ -135,7 +149,7 @@ function spawnPi(
 			stopTimers();
 			log.write(`\n# ${stamp()} spawn error: ${String(err)}\n`);
 			log.end();
-			resolve({ exitCode: 127, signal: null, timedOut, stdout, stderr });
+			resolve({ exitCode: 127, signal: null, timedOut, stdout, stderr, sleptMs: clock.slept });
 		});
 
 		child.on("close", (code, signal) => {
@@ -145,7 +159,7 @@ function spawnPi(
 					`stdout=${stdoutBytes}B stderr=${stderrBytes}B\n`,
 			);
 			log.end();
-			resolve({ exitCode: code, signal, timedOut, stdout, stderr });
+			resolve({ exitCode: code, signal, timedOut, stdout, stderr, sleptMs: clock.slept });
 		});
 	});
 }
@@ -246,47 +260,59 @@ export async function runJob(
 			["wake", wake.detail],
 			["network", netState.detail],
 		]);
-		const marker = parseMarker(result.stdout);
-
-		let status: ExecutionStatus;
-		let reason: string | null = null;
-		let warning = false;
-
-		if (result.timedOut) {
-			status = "timeout";
-			reason = `exceeded timeout of ${job.timeoutMs}ms`;
-		} else if (marker) {
-			status = marker.status === "success" ? "success" : "failure";
-			reason = marker.reason;
-			if (marker.status === "success" && result.exitCode !== 0) warning = true;
-		} else if (result.exitCode !== 0) {
-			// No marker: pi died before the agent finished. Tell a lost network
-			// (not the job's fault -> skipped) from a broken login (real failure).
-			const cls = classifyStderr(result.stderr);
-			if (cls?.kind === "offline") {
-				status = "skipped";
-				reason = `${OFFLINE_REASON_PREFIX} — ${cls.detail} (exited ${result.exitCode})`;
-			} else if (cls?.kind === "auth") {
-				status = "failure";
-				reason = cls.detail;
-			} else {
-				status = "failure";
-				reason = `exited ${result.exitCode} with no status marker`;
-			}
-		} else {
-			// clean exit but agent never emitted a marker
-			status = "success";
-			warning = true;
-			reason = "no status marker emitted";
-		}
-
 		return finalize(job, executionId, sessionId, logPath, now, {
-			status,
-			reason,
+			...deriveOutcome(result, job.timeoutMs),
 			exitCode: result.exitCode,
-			warning,
 		});
 	} finally {
 		release();
 	}
+}
+
+export interface Outcome {
+	status: ExecutionStatus;
+	reason: string | null;
+	warning: boolean;
+}
+
+// Status of a finished pi process. Pure, so the precedence is testable:
+// marker > broken login > slept mid-run > lost network > plain failure.
+export function deriveOutcome(
+	result: Pick<SpawnResult, "exitCode" | "timedOut" | "stdout" | "stderr" | "sleptMs">,
+	timeoutMs: number,
+): Outcome {
+	const marker = parseMarker(result.stdout);
+	const slept = result.sleptMs > 0 ? `${SLEPT_REASON_PREFIX} — ~${fmtDuration(result.sleptMs)} asleep` : null;
+
+	if (result.timedOut) {
+		// A run that slept and then sat silent for the whole awake budget almost
+		// always lost its connection while asleep.
+		if (slept) return { status: "skipped", reason: `${slept}, then timed out`, warning: false };
+		return { status: "timeout", reason: `exceeded timeout of ${timeoutMs}ms`, warning: false };
+	}
+	if (marker) {
+		return {
+			status: marker.status === "success" ? "success" : "failure",
+			reason: marker.reason,
+			warning: marker.status === "success" && result.exitCode !== 0,
+		};
+	}
+	if (result.exitCode === 0) {
+		// clean exit but agent never emitted a marker
+		return { status: "success", reason: "no status marker emitted", warning: true };
+	}
+
+	// No marker: pi died before the agent finished. A broken login is a real
+	// failure; losing the machine or the network is not the job's fault.
+	const cls = classifyStderr(result.stderr);
+	if (cls?.kind === "auth") return { status: "failure", reason: cls.detail, warning: false };
+	const exited = `exited ${result.exitCode}`;
+	if (slept) {
+		const why = cls ? `; ${cls.detail}` : "";
+		return { status: "skipped", reason: `${slept}${why} (${exited})`, warning: false };
+	}
+	if (cls?.kind === "offline") {
+		return { status: "skipped", reason: `${OFFLINE_REASON_PREFIX} — ${cls.detail} (${exited})`, warning: false };
+	}
+	return { status: "failure", reason: `${exited} with no status marker`, warning: false };
 }

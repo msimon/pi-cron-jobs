@@ -55,6 +55,9 @@ function wire() {
 	return { handlers, commands };
 }
 
+// The job row ("Retry all" may sit above it).
+const pickJob = (options: string[]) => options.find((o) => o.startsWith("Triage"));
+
 beforeAll(() => {
 	const job = {
 		id: "triage",
@@ -133,7 +136,7 @@ test("retry action spawns the wrapper for the job and stays in session", async (
 	const cap: Captured = { notify: [], status: [] };
 	const { commands } = wire();
 	const ctx = scriptedCtx(cap, [
-		(options) => options[0], // the job
+		pickJob, // the job
 		(options) => options[0], // newest execution
 		(options) => options.find((o) => o.includes("Retry")), // action menu
 	]);
@@ -160,7 +163,7 @@ test("ignoring a failed execution clears it from the badge and the notice", asyn
 	const cap: Captured = { notify: [], status: [] };
 	const { commands } = wire();
 	const ctx = scriptedCtx(cap, [
-		(options) => options[0], // the job
+		pickJob, // the job
 		(options) => options[0], // newest execution (e2, the failure)
 		(options) => options.find((o) => o.includes("Ignore")), // action menu
 	]);
@@ -184,7 +187,7 @@ test("un-ignoring a failed execution brings the warning back", async () => {
 	const cap: Captured = { notify: [], status: [] };
 	const { commands } = wire();
 	const ctx = scriptedCtx(cap, [
-		(options) => options[0],
+		pickJob,
 		(options) => options.find((o) => o.includes("ignored")), // labelled as ignored
 		(options) => options.find((o) => o.includes("Stop ignoring")),
 	]);
@@ -282,7 +285,7 @@ async function actionMenuFor(execMatch: (label: string) => boolean): Promise<str
 	const cap: Captured = { notify: [], status: [] };
 	const { commands } = wire();
 	const ctx = scriptedCtx(cap, [
-		(options) => options[0], // the job
+		pickJob, // the job
 		(options) => options.find(execMatch),
 		(options) => {
 			seen = options;
@@ -307,4 +310,93 @@ test("a run with a saved conversation offers Resume", async () => {
 	const options = await actionMenuFor((label) => label.includes("success"));
 	expect(options.some((o) => o.includes("Resume conversation"))).toBe(true);
 	expect(options.some((o) => o.includes("No conversation"))).toBe(false);
+});
+
+// ---- Retry all ----
+
+function addJobWithLast(id: string, last: Partial<Record<string, unknown>>) {
+	store.upsertJob({
+		id,
+		name: id,
+		prompt: "x",
+		schedule: { kind: "cron", expr: "0 9 * * *" },
+		cwd: dir,
+		threadMode: "per-execution",
+		enabled: true,
+		createdAt: "2026-01-01T00:00:00Z",
+		timeoutMs: 600000,
+	} as any);
+	store.appendExecution({
+		jobId: id,
+		executionId: `${id}-last`,
+		sessionId: `${id}__last`,
+		startedAt: "2026-06-26T07:00:00Z",
+		endedAt: "2026-06-26T07:01:00Z",
+		exitCode: 1,
+		status: "failure",
+		reason: "boom",
+		warning: false,
+		logPath: "x",
+		...last,
+	} as any);
+}
+
+test("Retry all runs every failed or interrupted job in one sequential batch", async () => {
+	addJobWithLast("book", {});
+	addJobWithLast("standup", { status: "skipped", reason: "offline — connection error (exited 1)" });
+	addJobWithLast("mail", {});
+	store.setExecutionIgnored("mail-last", true); // dismissed: left out
+	addJobWithLast("busy", {});
+	writeFileSync(path.join(paths.root, "busy.lock"), "1"); // run in flight: left out
+	addJobWithLast("fine", { status: "success", reason: null }); // ok: left out
+
+	const marker = path.join(dir, "retry-all-args");
+	const fakeBin = path.join(dir, "fake-batch");
+	writeFileSync(fakeBin, `#!/bin/sh\nprintf '%s' "$*" > ${JSON.stringify(marker)}\nsleep 2\n`);
+	chmodSync(fakeBin, 0o755);
+	process.env.PI_CRON_JOBS_BIN = fakeBin;
+
+	let menu: string[] = [];
+	const cap: Captured = { notify: [], status: [] };
+	const { commands } = wire();
+	await commands.jobs!.handler(
+		"",
+		scriptedCtx(cap, [
+			(options) => {
+				menu = options;
+				return options.find((o) => o.includes("Retry all"));
+			},
+		]),
+	);
+
+	expect(menu[0]).toContain("Retry all failed (3)"); // book, standup, busy
+	for (let i = 0; i < 50 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 50));
+	expect(readFileSync(marker, "utf8").trim()).toBe("run book standup");
+	expect(cap.notify.some(([m]) => m.includes("one after the other"))).toBe(true);
+
+	// A second click while the batch is still running does not start another.
+	const again: Captured = { notify: [], status: [] };
+	await commands.jobs!.handler(
+		"",
+		scriptedCtx(again, [(options) => options.find((o) => o.includes("Retry all"))]),
+	);
+	expect(again.notify.some(([m]) => m.includes("still running"))).toBe(true);
+
+	delete process.env.PI_CRON_JOBS_BIN;
+});
+
+test("no Retry all entry when nothing needs it", async () => {
+	for (const id of ["book", "standup", "busy"]) store.setExecutionIgnored(`${id}-last`, true);
+	let menu: string[] = [];
+	const { commands } = wire();
+	await commands.jobs!.handler(
+		"",
+		scriptedCtx({ notify: [], status: [] }, [
+			(options) => {
+				menu = options;
+				return undefined;
+			},
+		]),
+	);
+	expect(menu.some((o) => o.includes("Retry all"))).toBe(false);
 });

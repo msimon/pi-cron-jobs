@@ -12,7 +12,7 @@ import { runJob } from "./core/run";
 import { slugify } from "./core/ids";
 import { getScheduler } from "./scheduler/index";
 import { expandCron } from "./scheduler/cron";
-import type { Job, Schedule, ThreadMode } from "./core/types";
+import type { Execution, Job, Schedule, ThreadMode } from "./core/types";
 
 type Flags = { _: string[]; bools: Set<string>; vals: Map<string, string> };
 
@@ -164,27 +164,35 @@ function printExecLine(e: { startedAt: string; status: string; reason?: string |
 	console.log(`  ${e.startedAt}  ${e.status}${warn}${reason}  [${e.executionId}]`);
 }
 
+// `run a b c` runs the jobs one after the other (used by /jobs "Retry all"),
+// so browser-driving jobs never overlap.
 async function cmdRun(f: Flags): Promise<void> {
-	const id = f._[0] ?? die("usage: run <jobId>");
-	store.getJob(id) ?? die(`no such job: ${id}`);
-	const exec = await runJob(id);
-	// one-shot cleanup: after a "once" job fires (not skipped), unschedule + delete
-	// the job, but keep the log and the conversation as the trace.
-	const job = store.getJob(id);
-	if (job && job.schedule.kind === "once" && exec.status !== "skipped") {
-		const scheduler = await getScheduler();
-		scheduler.remove(id);
-		store.removeJob(id);
+	const ids = f._;
+	if (!ids.length) die("usage: run <jobId> [jobId...]");
+	for (const id of ids) store.getJob(id) ?? die(`no such job: ${id}`);
+	const results: Execution[] = [];
+	for (const id of ids) {
+		const exec = await runJob(id);
+		results.push(exec);
+		// one-shot cleanup: after a "once" job fires (not skipped), unschedule + delete
+		// the job, but keep the log and the conversation as the trace.
+		const job = store.getJob(id);
+		if (job && job.schedule.kind === "once" && exec.status !== "skipped") {
+			const scheduler = await getScheduler();
+			scheduler.remove(id);
+			store.removeJob(id);
+		}
+		if (f.bools.has("json")) continue;
+		const warn = exec.warning ? " (warning)" : "";
+		const prefix = ids.length > 1 ? `${id}: ` : "";
+		console.log(`${prefix}${exec.status}${warn}${exec.reason ? ` — ${exec.reason}` : ""}`);
+		if (exec.status !== "skipped") {
+			console.log(`log: ${exec.logPath}`);
+			console.log(`resume: pi-cron-jobs resume ${exec.executionId}`);
+		}
 	}
 	if (f.bools.has("json")) {
-		console.log(JSON.stringify(exec, null, 2));
-		return;
-	}
-	const warn = exec.warning ? " (warning)" : "";
-	console.log(`${exec.status}${warn}${exec.reason ? ` — ${exec.reason}` : ""}`);
-	if (exec.status !== "skipped") {
-		console.log(`log: ${exec.logPath}`);
-		console.log(`resume: pi-cron-jobs resume ${exec.executionId}`);
+		console.log(JSON.stringify(ids.length === 1 ? results[0] : results, null, 2));
 	}
 }
 
@@ -267,7 +275,7 @@ function usage(): void {
 			"  list [--json]",
 			"  show <jobId>",
 			"  executions <jobId> [--json]",
-			"  run <jobId> [--json]",
+			"  run <jobId> [jobId...] [--json]  # several ids run one after the other",
 			"  rm <jobId>",
 			"  resume [executionId]       # open cron session picker, or print command for one execution",
 			"  sync [--json]             # reconcile launchd with jobs.json",

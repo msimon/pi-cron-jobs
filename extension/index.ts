@@ -6,7 +6,7 @@
 // ctx/pi are typed loosely (any) like other pi extensions to avoid depending on
 // the globally-installed @earendil-works types at our project's tsc time.
 
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import * as paths from "../src/core/paths";
@@ -119,9 +119,16 @@ function findSessionFile(sessionId: string): string | null {
 	}
 }
 
-function jobLabel(job: Job, last: Execution | undefined, ignored?: Set<string>): string {
+// Latest run failed, timed out, or never happened because the Mac was asleep
+// or offline -- and you have not dismissed it.
+function needsRetry(e: Execution | undefined, ignored: Set<string>): boolean {
+	if (!e || ignored.has(e.executionId)) return false;
+	return isFailed(e, ignored) || isInterruptedSkip(e);
+}
+
+function jobLabel(job: Job, last: Execution | undefined, ignored: Set<string>): string {
 	const status = last ? last.status : "never run";
-	const flag = isFailed(last, ignored) ? " ⚠" : "";
+	const flag = needsRetry(last, ignored) ? " ⚠" : "";
 	const sched =
 		job.schedule.kind === "cron" ? job.schedule.expr : `@ ${fmtLocal(job.schedule.at)}`;
 	return `${job.name} [${sched}] — ${status}${flag}`;
@@ -143,8 +150,12 @@ async function openJobsMenu(ctx: any): Promise<void> {
 	const last = lastExecutionByJob(store.readExecutions());
 	const ignored = store.readIgnoredExecutions();
 	const labels = jobs.map((j) => jobLabel(j, last.get(j.id), ignored));
-	const choice = await ctx.ui.select("Scheduled jobs:", labels);
+	const toRetry = jobs.filter((j) => j.enabled && needsRetry(last.get(j.id), ignored));
+	const retryAll = toRetry.length ? `⟳  Retry all failed (${toRetry.length}), one after the other` : null;
+	const menu = retryAll ? [retryAll, ...labels] : labels;
+	const choice = await ctx.ui.select("Scheduled jobs:", menu);
 	if (!choice) return;
+	if (choice === retryAll) return retryAllFailed(ctx, toRetry);
 	const job = jobs[labels.indexOf(choice)];
 	if (!job) return;
 	await openExecutionsMenu(ctx, job);
@@ -277,6 +288,78 @@ async function retryJob(ctx: any, job: Job): Promise<void> {
 	}
 }
 
+// pid of the detached "Retry all" wrapper, so a second click does not start a
+// duplicate batch while the first is still working through its list.
+const retryBatchPidFile = () => path.join(paths.root, "retry-all.pid");
+
+function runningRetryBatch(): number | null {
+	try {
+		const pid = Number(readFileSync(retryBatchPidFile(), "utf8").trim());
+		if (!pid) return null;
+		process.kill(pid, 0); // throws if the process is gone
+		return pid;
+	} catch {
+		return null;
+	}
+}
+
+// Re-run every job whose latest run needs it, in ONE detached wrapper that runs
+// them one after the other (`pi-cron-jobs run a b c`): jobs that drive the
+// browser must not overlap.
+async function retryAllFailed(ctx: any, jobs: Job[]): Promise<void> {
+	const bin = resolveRunnerBin();
+	if (!bin) {
+		const ids = jobs.map((j) => j.id).join(" ");
+		ctx.ui.notify(`Wrapper binary not found — retry manually: pi-cron-jobs run ${ids}`, "warning");
+		return;
+	}
+	const busy = runningRetryBatch();
+	if (busy) {
+		ctx.ui.notify(`A "Retry all" batch is still running (pid ${busy}) — check /jobs when it is done.`, "warning");
+		return;
+	}
+	// A job with a run in flight (scheduled or single retry) would just be
+	// skipped as overlapping; leave it out instead.
+	const running = jobs.filter((j) => existsSync(path.join(paths.root, `${j.id}.lock`)));
+	const batch = jobs.filter((j) => !running.includes(j) && existsSync(j.cwd));
+	const missingCwd = jobs.filter((j) => !running.includes(j) && !existsSync(j.cwd));
+	if (!batch.length) {
+		ctx.ui.notify("Nothing to retry: every failed job is already running or has a missing cwd.", "info");
+		return;
+	}
+	const notes = [
+		running.length ? `Already running, left out: ${running.map((j) => j.name).join(", ")}.` : "",
+		missingCwd.length ? `Missing cwd, left out: ${missingCwd.map((j) => j.name).join(", ")}.` : "",
+	].filter(Boolean);
+	const ok = await ctx.ui.confirm(
+		`Retry ${batch.length} job(s) now?`,
+		[
+			`Run in the background, one after the other: ${batch.map((j) => j.name).join(" → ")}.`,
+			...notes,
+			"You stay in this session.",
+		].join(" "),
+	);
+	if (!ok) return;
+	try {
+		const child = spawn(bin, ["run", ...batch.map((j) => j.id)], {
+			cwd: paths.root,
+			detached: true,
+			stdio: "ignore",
+			env: { ...process.env, PI_CRON_JOBS_DIR: paths.root },
+		});
+		child.on("error", (err: Error) =>
+			ctx.ui.notify(`Retry all failed to start: ${err.message}`, "warning"),
+		);
+		if (child.pid) writeFileSync(retryBatchPidFile(), String(child.pid));
+		child.unref();
+		ctx.ui.notify(
+			`Retrying ${batch.length} job(s) one after the other — check /jobs for the results.`,
+			"info",
+		);
+	} catch (err: unknown) {
+		ctx.ui.notify(`Retry all failed to start: ${String(err)}`, "warning");
+	}
+}
 async function resumeExecution(ctx: any, job: Job, exec: Execution): Promise<void> {
 	const file = findSessionFile(exec.sessionId);
 	if (!file) {

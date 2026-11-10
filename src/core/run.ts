@@ -8,7 +8,8 @@ import path from "node:path";
 import * as store from "./store";
 import * as paths from "./paths";
 import { newExecutionId, sessionIdFor } from "./ids";
-import { markerInstruction, parseMarker } from "./marker";
+import { markerInstruction, parseMarker, parseReview, reviewInstruction } from "./marker";
+import { notifyPolicy } from "./jobs";
 import type { Execution, ExecutionStatus, Job } from "./types";
 import { DARK_WAKE_REASON_PREFIX, detectWakeState, type WakeState } from "./darkwake";
 import { waitForNetwork, type NetState } from "./network";
@@ -52,6 +53,8 @@ export function buildPiArgs(job: Job, sessionId: string, now = new Date()): stri
 		"--append-system-prompt",
 		markerInstruction(),
 	];
+	const policy = notifyPolicy(job);
+	if (policy !== "failure") args.push("--append-system-prompt", reviewInstruction(policy));
 	if (job.model) args.push("--model", job.model);
 	if (job.isolate) args.push("--no-extensions");
 	if (job.tools && job.tools.length) args.push("--tools", job.tools.join(","));
@@ -179,6 +182,8 @@ function finalize(
 		reason?: string | null;
 		exitCode?: number | null;
 		warning?: boolean;
+		review?: string | null;
+		action?: string | null;
 	},
 ): Execution {
 	const exec: Execution = {
@@ -192,6 +197,7 @@ function finalize(
 		reason: fields.reason ?? null,
 		warning: fields.warning ?? false,
 		logPath,
+		...(fields.review ? { review: fields.review, action: fields.action ?? null } : {}),
 	};
 	store.appendExecution(exec);
 	return exec;
@@ -260,8 +266,10 @@ export async function runJob(
 			["wake", wake.detail],
 			["network", netState.detail],
 		]);
+		const outcome = deriveOutcome(result, job.timeoutMs);
 		return finalize(job, executionId, sessionId, logPath, now, {
-			...deriveOutcome(result, job.timeoutMs),
+			...outcome,
+			...deriveReview(job, outcome, result.stdout),
 			exitCode: result.exitCode,
 		});
 	} finally {
@@ -273,6 +281,21 @@ export interface Outcome {
 	status: ExecutionStatus;
 	reason: string | null;
 	warning: boolean;
+}
+
+// Whether a finished run goes to the review inbox, per the job's notify setting.
+// Failures are not review items: they already flag the job as failing.
+export function deriveReview(
+	job: Job,
+	outcome: Outcome,
+	stdout: string,
+): { review: string | null; action: string | null } {
+	const policy = notifyPolicy(job);
+	if (policy === "failure" || outcome.status !== "success") return { review: null, action: null };
+	const parsed = parseReview(stdout);
+	if (parsed.review) return parsed;
+	if (policy === "always") return { review: "ran — success", action: null };
+	return { review: null, action: null };
 }
 
 // Status of a finished pi process. Pure, so the precedence is testable:

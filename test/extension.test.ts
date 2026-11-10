@@ -43,6 +43,8 @@ function scriptedCtx(cap: Captured, picks: Array<(options: string[]) => string |
 function wire() {
 	const handlers: Record<string, (e: any, c: any) => any> = {};
 	const commands: Record<string, any> = {};
+	const tools: Record<string, any> = {};
+	const sent: Array<[string, unknown]> = [];
 	const pi = {
 		on: (ev: string, fn: any) => {
 			handlers[ev] = fn;
@@ -50,9 +52,15 @@ function wire() {
 		registerCommand: (name: string, opts: any) => {
 			commands[name] = opts;
 		},
+		registerTool: (def: any) => {
+			tools[def.name] = def;
+		},
+		sendUserMessage: (msg: string, opts: unknown) => {
+			sent.push([msg, opts]);
+		},
 	};
 	(extMod.default as (pi: any) => void)(pi);
-	return { handlers, commands };
+	return { handlers, commands, tools, sent };
 }
 
 // The job row ("Retry all" may sit above it).
@@ -255,7 +263,7 @@ test("session_start warns about offline skips", async () => {
 	await handlers.session_shutdown!({}, fakeCtx(cap));
 });
 
-test("an ordinary skip does not raise a warning", async () => {
+test("an ordinary skip says nothing at session start (quiet runs stay quiet)", async () => {
 	store.appendExecution({
 		jobId: "triage",
 		executionId: "e4",
@@ -274,8 +282,7 @@ test("an ordinary skip does not raise a warning", async () => {
 	const { handlers } = wire();
 	await handlers.session_start!({}, fakeCtx(cap));
 
-	expect(cap.notify[0]![1]).toBe("info");
-	expect(cap.notify[0]![0]).toContain("all ok");
+	expect(cap.notify).toEqual([]);
 	await handlers.session_shutdown!({}, fakeCtx(cap));
 });
 
@@ -497,4 +504,118 @@ test("/jobs opens on the Scheduled tab; One-time lists one-shots, done ones flag
 
 	// enter opens that job's runs
 	expect(selects[0]).toContain('Executions of "lunch"');
+});
+
+// ---- review inbox ----
+
+function addReviewJob() {
+	store.upsertJob({
+		id: "mail",
+		name: "Mail triage",
+		prompt: "x",
+		schedule: { kind: "cron", expr: "15 10 * * 1-5" },
+		cwd: dir,
+		threadMode: "per-execution",
+		enabled: true,
+		createdAt: "2026-01-01T00:00:00Z",
+		timeoutMs: 600000,
+		notify: "review",
+	} as any);
+}
+
+function reviewExec(id: string, endedAt: string, extra: Record<string, unknown> = {}) {
+	store.appendExecution({
+		jobId: "mail",
+		executionId: id,
+		sessionId: `mail__${id}`,
+		startedAt: endedAt,
+		endedAt,
+		exitCode: 0,
+		status: "success",
+		reason: null,
+		warning: false,
+		logPath: "x",
+		review: "3 emails to answer",
+		action: "Open ~/.pi/email-review/x/review.md in Plannotator",
+		...extra,
+	} as any);
+}
+
+test("review item: status bar, session notice, To review tab first, Run action, cron_review_done", async () => {
+	addReviewJob();
+	reviewExec("r1", "2026-11-10T10:20:00Z");
+
+	// session start: the inbox is announced and shown in the status bar
+	const cap: Captured = { notify: [], status: [] };
+	const { handlers, commands, tools, sent } = wire();
+	await handlers.session_start!({}, fakeCtx(cap));
+	expect(cap.notify.some(([m, l]) => m.includes("📥 1 to review") && m.includes("3 emails to answer") && l === "info")).toBe(true);
+	expect(cap.status).toContain("📥 3 emails to answer");
+	await handlers.session_shutdown!({}, fakeCtx(cap));
+
+	// /jobs opens on To review; Enter picks the item; Run action sends its prompt
+	const selects: string[] = [];
+	const { ctx, screens } = tuiCtx({ notify: [], status: [] }, ["\r"], selects);
+	let actionMenu: string[] = [];
+	ctx.ui.select = (async (title: string, options: string[]) => {
+		selects.push(title);
+		actionMenu = options;
+		return options.find((o) => o.startsWith("▶ Run action"));
+	}) as any;
+	(ctx as any).isIdle = () => true;
+	await commands.jobs!.handler("", ctx);
+	expect(screens[0]!.join("\n")).toContain("To review (1)");
+	expect(screens[0]!.join("\n")).toMatch(/> Mail triage · .* — 3 emails to answer/);
+	expect(actionMenu[0]).toBe("▶ Run action in this session");
+	expect(actionMenu).toContain("✓ Mark review done");
+	expect(sent).toHaveLength(1);
+	expect(sent[0]![0]).toContain("Open ~/.pi/email-review/x/review.md in Plannotator");
+	expect(sent[0]![0]).toContain('cron_review_done with id "r1"');
+
+	// the agent closes it
+	const res = await tools.cron_review_done!.execute("t1", { id: "r1" }, undefined, undefined, fakeCtx(cap));
+	expect(res.content[0].text).toContain("Marked done");
+	expect(store.openReviews()).toHaveLength(0);
+	await expect(
+		tools.cron_review_done!.execute("t2", { id: "r1" }, undefined, undefined, fakeCtx(cap)),
+	).rejects.toThrow("No open review item");
+});
+
+test("cron_review_done with no id closes the item of the current conversation", async () => {
+	reviewExec("r2", "2026-11-11T10:20:00Z");
+	const { tools } = wire();
+	const ctx = { ...fakeCtx({ notify: [], status: [] }), sessionManager: { getSessionId: () => "mail__r2" } };
+	await tools.cron_review_done!.execute("t", {}, undefined, undefined, ctx);
+	expect(store.openReviews().map((e) => e.executionId)).not.toContain("r2");
+});
+
+test("live: a window announces new failures and review items, and stays quiet otherwise", () => {
+	const since = "2026-11-12T00:00:00Z";
+	reviewExec("r3", "2026-11-12T10:00:00Z");
+	reviewExec("q1", "2026-11-12T10:01:00Z", { review: null, action: null }); // quiet success
+	store.appendExecution({
+		jobId: "triage",
+		executionId: "f1",
+		sessionId: "triage__f1",
+		startedAt: "2026-11-12T10:02:00Z",
+		endedAt: "2026-11-12T10:02:30Z",
+		exitCode: 0,
+		status: "failure",
+		reason: "no room available",
+		warning: false,
+		logPath: "x",
+	});
+	const cap: Captured = { notify: [], status: [] };
+	const next = extMod.announceNewRuns(fakeCtx(cap), since);
+	expect(cap.notify).toEqual([
+		["📥 Mail triage — 3 emails to answer. /jobs", "info"],
+		["⏰ Triage — failure: no room available. /jobs", "warning"],
+	]);
+	expect(next).toBe("2026-11-12T10:02:30Z");
+	expect(store.readState().lastSeenTs).toBe("2026-11-12T10:02:30Z");
+
+	// nothing new: nothing said
+	const again: Captured = { notify: [], status: [] };
+	expect(extMod.announceNewRuns(fakeCtx(again), next)).toBe(next);
+	expect(again.notify).toEqual([]);
 });

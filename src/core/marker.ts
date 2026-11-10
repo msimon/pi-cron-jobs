@@ -47,3 +47,46 @@ export function parseMarker(stdout: string): ParsedMarker | null {
 	}
 	return null;
 }
+
+// ---- review / action markers (jobs with notify = review | always) ----
+
+export const REVIEW_PREFIX = "PI_JOB_REVIEW:";
+export const ACTION_PREFIX = "PI_JOB_ACTION:";
+
+export function reviewInstruction(policy: "review" | "always"): string {
+	const when =
+		policy === "review"
+			? "If this run produced something the user needs to review, answer or decide,"
+			: "Summarise the outcome for the user:";
+	return [
+		`${when} put these lines just BEFORE the final status line:`,
+		`  ${REVIEW_PREFIX} <one short line, e.g. "3 emails to answer">`,
+		`  ${ACTION_PREFIX} <optional: the exact prompt to run later, in an interactive`,
+		"    session, to act on it, e.g. \"Open ~/x/review.md in Plannotator, following",
+		"    the email-review skill step 5.\" -- on one line>",
+		policy === "review"
+			? `Omit both lines when nothing needs the user. ${ACTION_PREFIX} without ${REVIEW_PREFIX} is ignored.`
+			: `${ACTION_PREFIX} is optional.`,
+	].join("\n");
+}
+
+export interface ParsedReview {
+	review: string | null;
+	action: string | null;
+}
+
+// The last PI_JOB_REVIEW / PI_JOB_ACTION line of the output, if any.
+export function parseReview(stdout: string): ParsedReview {
+	const last = (prefix: string): string | null => {
+		const lines = stdout.split(/\r?\n/);
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const line = lines[i]?.trim().replace(/^[`*]+|[`*]+$/g, "");
+			if (!line?.startsWith(prefix)) continue;
+			const value = line.slice(prefix.length).trim();
+			return value || null;
+		}
+		return null;
+	};
+	const review = last(REVIEW_PREFIX);
+	return { review, action: review ? last(ACTION_PREFIX) : null };
+}

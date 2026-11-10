@@ -4,7 +4,15 @@
 // stamped with `completedAt`, so it stays visible in /jobs (with its runs and
 // conversations) until it is pruned COMPLETED_RETENTION_MS later.
 
-import type { Job } from "./types";
+import type { Job, NotifyPolicy } from "./types";
+
+export const NOTIFY_POLICIES: readonly NotifyPolicy[] = ["failure", "always", "review"];
+
+// A job's notify setting, or the default for its kind: one-shots were scheduled
+// for a reason, so every run is worth a look; recurring jobs speak up on failure.
+export function notifyPolicy(job: Job): NotifyPolicy {
+	return job.notify ?? (job.schedule.kind === "once" ? "always" : "failure");
+}
 
 export const COMPLETED_RETENTION_MS = 30 * 24 * 3600_000;
 

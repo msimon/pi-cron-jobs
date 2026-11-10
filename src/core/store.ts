@@ -147,6 +147,34 @@ export function setExecutionIgnored(executionId: string, ignored: boolean): void
 	writeState({ ...state, ignoredExecutionIds: pruned });
 }
 
+// ---- review inbox ----
+// A run with a `review` line is an open item until marked done (from /jobs or by
+// the agent through cron_review_done). Done ids live in state.json, like ignored
+// ones, so the ledger stays append-only.
+
+export function readReviewDone(): Set<string> {
+	return new Set(readState().reviewDoneIds ?? []);
+}
+
+export function setReviewDone(executionId: string, done: boolean): void {
+	const state = readState();
+	const next = new Set(state.reviewDoneIds ?? []);
+	if (done) next.add(executionId);
+	else next.delete(executionId);
+	const live = new Set(readExecutions().map((e) => e.executionId));
+	writeState({ ...state, reviewDoneIds: [...next].filter((id) => live.has(id)) });
+}
+
+// Open review items, newest first. Items whose job is gone (a pruned one-shot)
+// are dropped: there is nothing left to act on from /jobs.
+export function openReviews(): Execution[] {
+	const done = readReviewDone();
+	const jobIds = new Set(readJobs().map((j) => j.id));
+	return readExecutions()
+		.filter((e) => e.review && !done.has(e.executionId) && jobIds.has(e.jobId))
+		.reverse();
+}
+
 // ---- per-job lock (overlap policy = drop) ----
 // Best-effort exclusive lock via O_EXCL lockfile. Returns a release fn, or null
 // if a run for this job is already in progress.

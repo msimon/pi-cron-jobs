@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { parseMarker } from "../src/core/marker";
+import { parseMarker, parseReview } from "../src/core/marker";
 
 test("parses success", () => {
 	expect(parseMarker("did stuff\nPI_JOB_STATUS: success")).toEqual({
@@ -36,4 +36,13 @@ test("ignores surrounding whitespace", () => {
 		status: "success",
 		reason: null,
 	});
+});
+
+test("parseReview takes the last review and action lines", () => {
+	const out = "PI_JOB_REVIEW: old\nx\n**PI_JOB_REVIEW: 2 standups to review**\nPI_JOB_ACTION: open them\nPI_JOB_STATUS: success";
+	expect(parseReview(out)).toEqual({ review: "2 standups to review", action: "open them" });
+});
+
+test("parseReview ignores an action without a review", () => {
+	expect(parseReview("PI_JOB_ACTION: do it\nPI_JOB_STATUS: success")).toEqual({ review: null, action: null });
 });

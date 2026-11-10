@@ -49,6 +49,33 @@ PI_JOB_STATUS: failure - <short reason>
 That marker is the authoritative task status — it catches **soft failures** like
 "no room available" that exit 0. Exit code/timeout are fallbacks for hard crashes.
 
+### Notifications and the review inbox
+
+Each job has a `notify` setting that decides when a run gets your attention:
+
+| `--notify` | You hear about a run when… | Good for |
+|---|---|---|
+| `failure` (default for `--cron`) | it fails, times out, or is skipped by sleep / no network | room booking, backups |
+| `always` (default for `--at`) | it ran at all | one-shots |
+| `review` | the agent says something needs you | email triage, standup extraction |
+
+For `review` and `always` jobs the runner also asks the agent to put these lines
+before the status marker when it has something for you:
+
+```
+PI_JOB_REVIEW: 3 emails to answer
+PI_JOB_ACTION: Open ~/.pi/email-review/2026-11-10/review.md in Plannotator, following the email-review skill step 5.
+PI_JOB_STATUS: success
+```
+
+A run with a review line becomes an item in the **To review** tab of `/jobs` and
+in the status bar (`📥 3 emails to answer`, or `📥 2 to review`). Open pi windows
+announce it within ~5s of the run finishing. The item stays until it is marked
+done: from `/jobs`, or by the agent calling the `cron_review_done` tool once the
+work is finished. `PI_JOB_ACTION` is optional; it is the prompt **Run action**
+sends into your current session (with the item id the agent needs to close it).
+Failures are never review items: they flag the job as failing instead.
+
 ## Requirements
 
 - macOS (launchd). Linux cron fallback is on the roadmap.
@@ -105,6 +132,7 @@ pi-cron-jobs executions <jobId>   # full run history
 pi-cron-jobs run <jobId>          # run now (also what launchd calls)
 pi-cron-jobs resume               # open the cron-session picker
 pi-cron-jobs resume <executionId> # print the command for one execution
+pi-cron-jobs set <jobId> --notify review   # edit a job (any add option) + reschedule
 pi-cron-jobs rm <jobId>           # unschedule + delete
 pi-cron-jobs sync                 # reconcile launchd with jobs.json
 pi-cron-jobs status               # launchd load state per job
@@ -126,13 +154,19 @@ pi-cron-jobs status               # launchd load state per job
 | `--thread per-execution\|continuous` | conversation model (default per-execution) |
 | `--timeout 10m` | per-run wall-clock timeout (default 10m) |
 | `--max-runs N` | cap total executions |
+| `--notify failure\|always\|review` | when a run gets your attention (see above) |
 
 Cron is expanded into launchd `StartCalendarInterval` entries (ranges, lists,
 steps, `*/n` supported). `* * * * *` = every minute; `0 9 * * 1-5` = weekdays 9am.
 
 ## Usage (in pi)
 
-- **`/jobs`** — filter with the **Scheduled** (recurring cron jobs, the default), **One-time** (every `--at` job, upcoming or done) and **All** tabs (←/→ or Tab to switch), pick a job → see its executions → pick one, then either
+- **`/jobs`** — tabs: **To review** (runs waiting for you; the default when
+  there are any), **Scheduled** (recurring cron jobs; the default otherwise),
+  **One-time** (every `--at` job, upcoming or done) and **All** (←/→ or Tab to
+  switch). Pick a review item → **Run action in this session**, **Resume
+  conversation**, **Mark review done** or **Retry now**. Pick a job → see its
+  executions → pick one, then either
   **Resume conversation** (switches your pi session into that conversation),
   **Retry now** (re-runs the job in the background; you stay in the session you
   were in), or **Ignore this failure**. The first two ask for confirmation.
@@ -145,9 +179,13 @@ steps, `*/n` supported). `* * * * *` = every minute; `0 9 * * 1-5` = weekdays 9a
   can be un-ignored from the same menu; the action returns you to the execution
   list so a batch can be cleared in one pass.
 - **`/jobs sync`** — reconcile launchd with `jobs.json`.
-- **At session start** — a one-line notice: *"⏰ 3 scheduled runs since last visit
-  — 1 failed (morning-triage). /jobs"*.
-- **Status line** — always-on badge `cron: 5 · 1 failing ⚠️`.
+- **At session start** — a notice for failures since your last visit (*"⏰ 3
+  scheduled runs since last visit — 1 failed (morning-triage). /jobs"*) and one
+  for open review items. Quiet successful runs say nothing.
+- **While pi is open** — each window announces new failures and review items
+  within ~5s.
+- **Status line** — badge `cron: 5 · 1 failing ⚠️`, plus `📥 …` while the
+  review inbox is not empty.
 
 ## Development
 

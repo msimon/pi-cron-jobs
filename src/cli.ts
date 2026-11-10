@@ -12,6 +12,7 @@ import { runJob } from "./core/run";
 import { slugify } from "./core/ids";
 import { getScheduler } from "./scheduler/index";
 import { expandCron } from "./scheduler/cron";
+import { isCompleted } from "./core/jobs";
 import type { Execution, Job, Schedule, ThreadMode } from "./core/types";
 
 type Flags = { _: string[]; bools: Set<string>; vals: Map<string, string> };
@@ -117,6 +118,7 @@ function describeSchedule(s: Schedule): string {
 }
 
 function cmdList(f: Flags): void {
+	store.pruneCompletedJobs();
 	const jobs = store.readJobs();
 	if (f.bools.has("json")) {
 		console.log(JSON.stringify(jobs, null, 2));
@@ -131,9 +133,9 @@ function cmdList(f: Flags): void {
 		const mine = execs.filter((e) => e.jobId === j.id);
 		const last = mine[mine.length - 1];
 		const status = last ? last.status : "—";
-		const enabled = j.enabled ? "" : " (disabled)";
+		const flag = isCompleted(j) ? " (done)" : j.enabled ? "" : " (disabled)";
 		console.log(
-			`${j.id}${enabled}\n  ${j.name}\n  ${describeSchedule(j.schedule)} · runs=${mine.length} · last=${status}`,
+			`${j.id}${flag}\n  ${j.name}\n  ${describeSchedule(j.schedule)} · runs=${mine.length} · last=${status}`,
 		);
 	}
 }
@@ -174,13 +176,14 @@ async function cmdRun(f: Flags): Promise<void> {
 	for (const id of ids) {
 		const exec = await runJob(id);
 		results.push(exec);
-		// one-shot cleanup: after a "once" job fires (not skipped), unschedule + delete
-		// the job, but keep the log and the conversation as the trace.
+		// one-shot cleanup: after a "once" job fires (not skipped), unschedule it and
+		// mark it completed. It stays in jobs.json (so /jobs can still reach its runs
+		// and conversations) until pruneCompletedJobs drops it after 30 days.
 		const job = store.getJob(id);
 		if (job && job.schedule.kind === "once" && exec.status !== "skipped") {
 			const scheduler = await getScheduler();
 			scheduler.remove(id);
-			store.removeJob(id);
+			store.upsertJob({ ...job, completedAt: exec.endedAt ?? new Date().toISOString() });
 		}
 		if (f.bools.has("json")) continue;
 		const warn = exec.warning ? " (warning)" : "";
@@ -191,6 +194,7 @@ async function cmdRun(f: Flags): Promise<void> {
 			console.log(`resume: pi-cron-jobs resume ${exec.executionId}`);
 		}
 	}
+	store.pruneCompletedJobs();
 	if (f.bools.has("json")) {
 		console.log(JSON.stringify(ids.length === 1 ? results[0] : results, null, 2));
 	}

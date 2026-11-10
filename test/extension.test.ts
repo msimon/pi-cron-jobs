@@ -400,3 +400,101 @@ test("no Retry all entry when nothing needs it", async () => {
 	);
 	expect(menu.some((o) => o.includes("Retry all"))).toBe(false);
 });
+
+// ---- tabbed /jobs picker ----
+
+// ctx in TUI mode whose custom() drives the component with `keys`, then returns
+// what it resolved to plus every screen it rendered.
+function tuiCtx(cap: Captured, keys: string[], selects: string[]) {
+	const KEYMAP: Record<string, string> = {
+		"\r": "tui.select.confirm",
+		"\x1b": "tui.select.cancel",
+		"\x1b[A": "tui.select.up",
+		"\x1b[B": "tui.select.down",
+	};
+	const screens: string[][] = [];
+	const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
+	const keybindings = { matches: (data: string, id: string) => KEYMAP[data] === id };
+	const ctx = {
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			notify: (msg: string, level: string) => cap.notify.push([msg, level]),
+			setStatus: (_key: string, val: string | undefined) => cap.status.push(val),
+			select: async (title: string) => {
+				selects.push(title);
+				return undefined;
+			},
+			confirm: async () => false,
+			custom: (factory: any) =>
+				new Promise((resolve) => {
+					let result: unknown;
+					let finished = false;
+					const comp = factory({ requestRender: () => {} }, theme, keybindings, (r: unknown) => {
+						finished = true;
+						result = r;
+					});
+					screens.push(comp.render(200));
+					for (const k of keys) {
+						if (finished) break;
+						comp.handleInput(k);
+						screens.push(comp.render(200));
+					}
+					resolve(result);
+				}),
+		},
+	};
+	return { ctx, screens };
+}
+
+test("/jobs opens on the Scheduled tab; One-time lists one-shots, done ones flagged; old ones pruned", async () => {
+	const once = (id: string, completedAt: string | null) =>
+		store.upsertJob({
+			id,
+			name: id,
+			prompt: "x",
+			schedule: { kind: "once", at: "2026-11-11T12:00:00" },
+			cwd: dir,
+			threadMode: "per-execution",
+			enabled: true,
+			createdAt: "2026-01-01T00:00:00Z",
+			timeoutMs: 600000,
+			completedAt,
+		} as any);
+	once("lunch", new Date().toISOString());
+	once("ancient", "2020-01-01T00:00:00Z"); // past the 30-day window
+	store.appendExecution({
+		jobId: "lunch",
+		executionId: "lunch-1",
+		sessionId: "lunch__1",
+		startedAt: "2026-11-11T12:00:00Z",
+		endedAt: "2026-11-11T12:01:00Z",
+		exitCode: 0,
+		status: "success",
+		reason: null,
+		warning: false,
+		logPath: "x",
+	});
+
+	const selects: string[] = [];
+	const { ctx, screens } = tuiCtx({ notify: [], status: [] }, ["\x1b[C", "\r"], selects);
+	const { commands } = wire();
+	await commands.jobs!.handler("", ctx);
+
+	// first screen: Scheduled tab, cron jobs only
+	const first = screens[0]!.join("\n");
+	expect(first).toContain("Scheduled (6)");
+	expect(first).toContain("One-time (1)");
+	expect(first).toContain("All (7)");
+	expect(first).toContain("Triage [0 9 * * *]");
+	expect(first).not.toContain("lunch");
+
+	// → One-time: the finished one-shot, flagged done; the expired one is gone
+	const second = screens[1]!.join("\n");
+	expect(second).toMatch(/> lunch \[@ .*\] — success · done/);
+	expect(second).not.toContain("Triage");
+	expect(store.getJob("ancient")).toBeUndefined();
+
+	// enter opens that job's runs
+	expect(selects[0]).toContain('Executions of "lunch"');
+});

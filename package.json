@@ -18,7 +18,14 @@
   "pi": {
     "extensions": ["./extension"]
   },
+  "peerDependencies": {
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-tui": { "optional": true }
+  },
   "devDependencies": {
+    "@earendil-works/pi-tui": "^1.5.1",
     "@types/bun": "^1.3.14",
     "@types/node": "^22.20.0",
     "typescript": "5"

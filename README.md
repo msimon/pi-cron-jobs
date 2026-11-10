@@ -96,6 +96,8 @@ pi-cron-jobs add --name "Morning triage" \
 # one-shot reminder at a precise time
 pi-cron-jobs add --name "Renew cert" --prompt "Renew the TLS cert and verify." \
   --at 2026-07-01T09:00:00
+# after it fires, a one-shot is unscheduled and marked done (kept in /jobs and
+# `list` for 30 days, then pruned; its log and conversation are never deleted)
 
 pi-cron-jobs list                 # all jobs + last status
 pi-cron-jobs show <jobId>         # job detail + recent executions
@@ -130,7 +132,7 @@ steps, `*/n` supported). `* * * * *` = every minute; `0 9 * * 1-5` = weekdays 9a
 
 ## Usage (in pi)
 
-- **`/jobs`** — pick a job → see its executions → pick one, then either
+- **`/jobs`** — filter with the **Scheduled** (recurring cron jobs, the default), **One-time** (every `--at` job, upcoming or done) and **All** tabs (←/→ or Tab to switch), pick a job → see its executions → pick one, then either
   **Resume conversation** (switches your pi session into that conversation),
   **Retry now** (re-runs the job in the background; you stay in the session you
   were in), or **Ignore this failure**. The first two ask for confirmation.

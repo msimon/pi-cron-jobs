@@ -5,6 +5,7 @@
 import { execFileSync, execSync } from "node:child_process";
 import path from "node:path";
 import * as paths from "../core/paths";
+import { isScheduled } from "../core/jobs";
 import type { Job } from "../core/types";
 import type { SchedulerEntry } from "./launchd";
 
@@ -141,7 +142,7 @@ export function sync(jobs: Job[]): { installed: string[]; removed: string[] } {
 		if (m) existing.add(m[1]!);
 	}
 
-	const wanted = new Set(jobs.filter((j) => j.enabled).map((j) => j.id));
+	const wanted = new Set(jobs.filter(isScheduled).map((j) => j.id));
 
 	// remove jobs no longer wanted
 	for (const id of existing) {
@@ -153,7 +154,7 @@ export function sync(jobs: Job[]): { installed: string[]; removed: string[] } {
 
 	// install/update wanted jobs
 	for (const job of jobs) {
-		if (!job.enabled) continue;
+		if (!isScheduled(job)) continue;
 		install(job);
 		installed.push(job.id);
 	}

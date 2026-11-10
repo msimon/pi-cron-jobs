@@ -250,9 +250,10 @@ Append-only JSONL = cheap concurrent writes from headless runs, trivial
      c. no marker + non-zero exit                → status=failed (hard crash)
      d. marker=success but exit≠0                → status=success, warning=true
 6. append final execution record to executions.jsonl (incl. sessionId, reason, exitCode)
-7. if job.schedule.kind === "once": unload+delete the launchd agent AND delete the
-   job from jobs.json — BUT keep the log and the pi session (the conversation) as
-   the trace.
+7. if job.schedule.kind === "once" (and the run was not skipped): unload+delete the
+   launchd agent and stamp the job with `completedAt` — it stays in jobs.json (so
+   /jobs can still reach its runs) and is pruned 30 days later. The log and the pi
+   session (the conversation) are kept as the trace.
 ```
 
 - **Status marker (the soft-failure contract, Q8):** the runner appends a system
@@ -353,7 +354,7 @@ interface Scheduler {
 | # | Decision |
 |---|----------|
 | Q1 | **Job → executions, one conversation per execution (default).** Each run mints a unique `--session-id` (fresh clean thread, no bloat); opt-in `threadMode:continuous` reuses one growing thread. Resume via `pi --session <id>` / `--resume`, works from anywhere with a cross-project confirm. |
-| Q2 | One-shot job: after firing, unload+delete launchd agent AND delete the job; **keep log + conversation** as trace. |
+| Q2 | One-shot job: after firing, unload+delete launchd agent and mark the job `completedAt` (kept for 30 days, shown under the One-time tab in /jobs, then pruned); **keep log + conversation** as trace. |
 | Q3 | Overlap → **drop** (skip, record `skipped`). |
 | Q4 | **10 min** timeout; on timeout → `status=timeout` (treated as failed) + session stays resumable. |
 | Q5 | cwd = where the job was created (jobs created from pi). Runs fire from that cwd. |

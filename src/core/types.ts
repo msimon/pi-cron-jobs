@@ -40,6 +40,7 @@ export interface Job {
 	createdAt: string;
 	maxRuns?: number | null; // optional cap on total executions
 	timeoutMs: number; // wall-clock per execution
+	completedAt?: string | null; // one-shot jobs: when it fired; unscheduled, kept for /jobs, pruned after 30 days
 }
 
 export interface Execution {

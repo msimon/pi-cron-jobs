@@ -15,6 +15,7 @@ import {
 import path from "node:path";
 import * as paths from "./paths";
 import type { AppState, Execution, Job } from "./types";
+import { expiredCompletedJobs } from "./jobs";
 
 function ensureRoot(): void {
 	mkdirSync(paths.root, { recursive: true });
@@ -62,6 +63,16 @@ export function removeJob(id: string): boolean {
 	if (next.length === jobs.length) return false;
 	writeJobs(next);
 	return true;
+}
+
+// Drop finished one-shots past the retention window. Their schedule was already
+// removed when they fired; their ledger entries, logs and conversations stay.
+export function pruneCompletedJobs(now: Date = new Date()): string[] {
+	const jobs = readJobs();
+	const expired = new Set(expiredCompletedJobs(jobs, now).map((j) => j.id));
+	if (!expired.size) return [];
+	writeJobs(jobs.filter((j) => !expired.has(j.id)));
+	return [...expired];
 }
 
 // ---- executions ledger ----

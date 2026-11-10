@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import * as paths from "../core/paths";
 import { expandCron, onceInterval, type CalendarInterval } from "./cron";
+import { isScheduled } from "../core/jobs";
 import type { Job } from "../core/types";
 
 const LABEL_PREFIX = "com.pi-cron-jobs";
@@ -173,13 +174,14 @@ export function remove(jobId: string): void {
 	}
 }
 
-// Reconcile OS state with jobs.json: install enabled jobs, remove stale/disabled.
+// Reconcile OS state with jobs.json: install scheduled jobs, remove stale,
+// disabled and completed (fired one-shot) ones.
 export function sync(jobs: Job[]): { installed: string[]; removed: string[] } {
-	const wanted = new Set(jobs.filter((j) => j.enabled).map((j) => j.id));
+	const wanted = new Set(jobs.filter(isScheduled).map((j) => j.id));
 	const installed: string[] = [];
 	const removed: string[] = [];
 
-	// remove plists that no longer correspond to an enabled job
+	// remove plists that no longer correspond to a scheduled job
 	const dir = launchAgentsDir();
 	if (existsSync(dir)) {
 		for (const f of readdirSync(dir)) {
@@ -192,7 +194,7 @@ export function sync(jobs: Job[]): { installed: string[]; removed: string[] } {
 		}
 	}
 	for (const job of jobs) {
-		if (!job.enabled) continue;
+		if (!isScheduled(job)) continue;
 		install(job);
 		installed.push(job.id);
 	}

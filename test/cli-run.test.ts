@@ -58,3 +58,39 @@ test("`run` with an unknown id fails before running anything", () => {
 	expect(res.status).toBe(1);
 	expect(res.stderr).toContain("no such job: nope");
 });
+
+test("a one-shot job is kept and marked completed after it fires; expired ones are pruned", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "pcj-cli-"));
+	const once = (id: string, extra: Record<string, unknown> = {}) => ({
+		id,
+		name: id,
+		prompt: `job ${id}`,
+		schedule: { kind: "once", at: "2026-11-11T12:00:00" },
+		cwd: dir,
+		threadMode: "per-execution",
+		enabled: true,
+		createdAt: "2026-01-01T00:00:00Z",
+		timeoutMs: 30_000,
+		...extra,
+	});
+	// unique ids: scheduler.remove() runs for real (a no-op for unknown labels)
+	const id = `pcj-test-once-${process.pid}`;
+	const old = `pcj-test-old-${process.pid}`;
+	writeFileSync(
+		path.join(dir, "jobs.json"),
+		JSON.stringify([once(id), once(old, { completedAt: "2020-01-01T00:00:00Z" })]),
+	);
+	const fakePi = path.join(dir, "fake-pi");
+	writeFileSync(fakePi, "#!/bin/sh\necho 'PI_JOB_STATUS: success'\n");
+	chmodSync(fakePi, 0o755);
+
+	const res = spawnSync(process.execPath, [CLI, "run", id, "--json"], {
+		encoding: "utf8",
+		env: { ...process.env, PI_CRON_JOBS_DIR: dir, PI_BIN: fakePi, PI_CRON_JOBS_NET_HOST: "off" },
+	});
+	expect(res.status).toBe(0);
+	const exec = JSON.parse(res.stdout);
+	const jobs = JSON.parse(readFileSync(path.join(dir, "jobs.json"), "utf8"));
+	expect(jobs.map((j: any) => j.id)).toEqual([id]);
+	expect(jobs[0].completedAt).toBe(exec.endedAt);
+});

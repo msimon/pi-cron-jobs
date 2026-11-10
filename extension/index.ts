@@ -14,6 +14,8 @@ import * as store from "../src/core/store";
 import * as launchd from "../src/scheduler/launchd";
 import type { Execution, Job } from "../src/core/types";
 import { interruptKind } from "../src/core/outcome";
+import { filterJobs, isCompleted, isScheduled, JOB_TABS } from "../src/core/jobs";
+import { canUseTabs, tabbedSelect, type TabRow } from "./tabbed-select";
 
 const STATUS_KEY = "pi-cron-jobs";
 const POLL_MS = 5000;
@@ -55,7 +57,7 @@ function renderStatus(ctx: any): void {
 	}
 	const last = lastExecutionByJob(store.readExecutions());
 	const ignored = store.readIgnoredExecutions();
-	const active = jobs.filter((j) => j.enabled).length;
+	const active = jobs.filter(isScheduled).length;
 	const failing = jobs.filter((j) => isFailed(last.get(j.id), ignored)).length;
 	const warn = failing > 0 ? ` · ${failing} failing ⚠️` : "";
 	ctx.ui.setStatus(STATUS_KEY, `cron: ${active}${warn}`);
@@ -131,7 +133,8 @@ function jobLabel(job: Job, last: Execution | undefined, ignored: Set<string>): 
 	const flag = needsRetry(last, ignored) ? " ⚠" : "";
 	const sched =
 		job.schedule.kind === "cron" ? job.schedule.expr : `@ ${fmtLocal(job.schedule.at)}`;
-	return `${job.name} [${sched}] — ${status}${flag}`;
+	const done = isCompleted(job) ? " · done" : "";
+	return `${job.name} [${sched}] — ${status}${flag}${done}`;
 }
 
 function execLabel(e: Execution, ignored?: Set<string>): string {
@@ -141,7 +144,25 @@ function execLabel(e: Execution, ignored?: Set<string>): string {
 	return `${fmtLocal(e.startedAt)}  ${e.status}${warn}${reason}${muted}`;
 }
 
+type JobPick = { kind: "job"; job: Job } | { kind: "retryAll"; jobs: Job[] };
+
+// Rows for one set of jobs: an optional "Retry all failed" row, then one per job.
+function jobRows(jobs: Job[], last: Map<string, Execution>, ignored: Set<string>): TabRow<JobPick>[] {
+	const toRetry = jobs.filter((j) => j.enabled && needsRetry(last.get(j.id), ignored));
+	const rows: TabRow<JobPick>[] = toRetry.length
+		? [
+				{
+					label: `⟳  Retry all failed (${toRetry.length}), one after the other`,
+					value: { kind: "retryAll", jobs: toRetry },
+				},
+			]
+		: [];
+	for (const j of jobs) rows.push({ label: jobLabel(j, last.get(j.id), ignored), value: { kind: "job", job: j } });
+	return rows;
+}
+
 async function openJobsMenu(ctx: any): Promise<void> {
+	store.pruneCompletedJobs();
 	const jobs = store.readJobs();
 	if (!jobs.length) {
 		ctx.ui.notify("No scheduled jobs. Create one with the pi-cron-jobs CLI.", "info");
@@ -149,16 +170,25 @@ async function openJobsMenu(ctx: any): Promise<void> {
 	}
 	const last = lastExecutionByJob(store.readExecutions());
 	const ignored = store.readIgnoredExecutions();
-	const labels = jobs.map((j) => jobLabel(j, last.get(j.id), ignored));
-	const toRetry = jobs.filter((j) => j.enabled && needsRetry(last.get(j.id), ignored));
-	const retryAll = toRetry.length ? `⟳  Retry all failed (${toRetry.length}), one after the other` : null;
-	const menu = retryAll ? [retryAll, ...labels] : labels;
-	const choice = await ctx.ui.select("Scheduled jobs:", menu);
-	if (!choice) return;
-	if (choice === retryAll) return retryAllFailed(ctx, toRetry);
-	const job = jobs[labels.indexOf(choice)];
-	if (!job) return;
-	await openExecutionsMenu(ctx, job);
+
+	let pick: JobPick | undefined;
+	if (canUseTabs(ctx)) {
+		// Scheduled / One-time / All, opening on Scheduled.
+		const tabs = JOB_TABS.map((t) => {
+			const list = filterJobs(jobs, t.id);
+			return { title: t.title, count: list.length, rows: jobRows(list, last, ignored) };
+		});
+		pick = await tabbedSelect(ctx, "Jobs", tabs, 0);
+	} else {
+		// No interactive TUI (RPC, tests): plain select over every job.
+		const rows = jobRows(jobs, last, ignored);
+		const labels = rows.map((r) => r.label);
+		const choice = await ctx.ui.select("Scheduled jobs:", labels);
+		pick = choice ? rows[labels.indexOf(choice)]?.value : undefined;
+	}
+	if (!pick) return;
+	if (pick.kind === "retryAll") return retryAllFailed(ctx, pick.jobs);
+	await openExecutionsMenu(ctx, pick.job);
 }
 
 const EXEC_PAGE_SIZE = 15;
@@ -381,6 +411,7 @@ export default function (pi: any) {
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		if (!ctx?.hasUI) return;
+		store.pruneCompletedJobs();
 		notifySinceLastSeen(ctx);
 		renderStatus(ctx);
 		pollTimer ??= setInterval(() => renderStatus(ctx), POLL_MS);

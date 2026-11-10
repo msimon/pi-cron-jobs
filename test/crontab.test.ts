@@ -205,6 +205,14 @@ test("sync: skips disabled jobs", () => {
 	expect(crontabContent).not.toContain("# pi-cron-jobs:disabled-job");
 });
 
+test("sync: skips completed one-shot jobs", () => {
+	const done = { ...makeOnceJob("done-job"), completedAt: "2026-11-11T12:01:00Z" };
+	const result = crontab.sync([done]);
+
+	expect(result.installed).not.toContain("done-job");
+	expect(execSyncCalls.some((c) => c.includes("| at "))).toBe(false);
+});
+
 test("sync: returns empty arrays when nothing to do", () => {
 	crontab.install(makeCronJob("my-job"));
 	const result = crontab.sync([makeCronJob("my-job")]);

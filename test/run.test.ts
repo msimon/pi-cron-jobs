@@ -27,11 +27,23 @@ test("stores cron conversations outside pi's default session directory", () => {
 	]);
 });
 
-test("review / always jobs get the review instruction; failure jobs do not", () => {
-	const count = (j: Job) => buildPiArgs(j, "s").filter((a) => a.includes("PI_JOB_REVIEW")).length;
-	expect(count(job)).toBe(0);
-	expect(count({ ...job, notify: "review" })).toBe(1);
-	expect(count({ ...job, schedule: { kind: "once", at: "2026-11-11T12:00:00" } })).toBe(1); // one-shot default: always
+test("one closing instruction, shaped by the notify setting", () => {
+	const closing = (j: Job) => {
+		const args = buildPiArgs(j, "s");
+		expect(args.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+		return args[args.indexOf("--append-system-prompt") + 1]!;
+	};
+	const failure = closing(job);
+	expect(failure).toContain("End your reply with this closing line");
+	expect(failure).not.toContain("PI_JOB_REVIEW");
+
+	const review = closing({ ...job, notify: "review" });
+	expect(review).toContain("PI_JOB_REVIEW: only when this run produced something");
+	expect(review.indexOf("PI_JOB_ACTION: <")).toBeLessThan(review.indexOf("PI_JOB_STATUS: success"));
+
+	// one-shot default: always
+	const always = closing({ ...job, schedule: { kind: "once", at: "2026-11-11T12:00:00" } });
+	expect(always).toContain("PI_JOB_REVIEW: mandatory when the run succeeded");
 });
 
 test("deriveReview follows the notify setting", () => {

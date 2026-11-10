@@ -1,24 +1,53 @@
-// Status-marker convention: the soft-failure contract.
-// The runner appends an instruction telling the agent to end with a marker line;
-// we parse the LAST such line from the run's stdout as the authoritative status.
+// Closing-block convention: the soft-failure contract, plus (for notify =
+// review | always) the review item the run raises.
+// The runner appends an instruction telling the agent to end with a closing
+// block; we parse the LAST status line from stdout as the authoritative status.
+
+import type { NotifyPolicy } from "./types";
 
 export const MARKER_PREFIX = "PI_JOB_STATUS:";
+export const REVIEW_PREFIX = "PI_JOB_REVIEW:";
+export const ACTION_PREFIX = "PI_JOB_ACTION:";
 
-export function markerInstruction(): string {
-	return [
+const STATUS_RULE =
+	`- ${MARKER_PREFIX} mandatory on every run, and always the last line. Emit \`success\` only if the task's goal was actually achieved; \`failure\` if it was not, for ANY reason (missing info, nothing available, a check did not pass, an error, or you could only ask questions).`;
+
+// One instruction, shaped by the job's notify setting (see README).
+export function closingInstruction(policy: NotifyPolicy): string {
+	const head = [
 		"UNATTENDED SCHEDULED MODE: there is NO human to answer questions and there",
 		"will be no follow-up turn. Do not ask clarifying questions — act on the",
 		"information you have and complete the task as best you can.",
 		"",
-		"You MUST end your reply with EXACTLY one final line, with nothing after it:",
-		`  ${MARKER_PREFIX} success`,
-		"  -- or --",
-		`  ${MARKER_PREFIX} failure - <short reason>`,
+	];
+	const status = `  ${MARKER_PREFIX} success   -- or --   ${MARKER_PREFIX} failure - <short reason>`;
+	if (policy === "failure") {
+		return [...head, "End your reply with this closing line, with nothing after it:", "", status, "", STATUS_RULE].join("\n");
+	}
+	const review =
+		policy === "review"
+			? `  ${REVIEW_PREFIX} <one short line for the user, e.g. "3 items to check">`
+			: `  ${REVIEW_PREFIX} <one-line summary of the outcome for the user>`;
+	const rules =
+		policy === "review"
+			? [
+					`- ${REVIEW_PREFIX} only when this run produced something the user needs to review, answer or decide. Leave it out otherwise.`,
+					`- ${ACTION_PREFIX} optional, and only together with PI_JOB_REVIEW.`,
+				]
+			: [
+					`- ${REVIEW_PREFIX} mandatory when the run succeeded. On failure, leave it out: the failure itself is reported.`,
+					`- ${ACTION_PREFIX} optional, only when there is a natural next step for the user.`,
+				];
+	return [
+		...head,
+		"End your reply with this closing block, with nothing after it:",
 		"",
-		"Emit `success` only if the task's goal was actually achieved. Emit `failure`",
-		"if it was not achieved for ANY reason (missing info, nothing available, a",
-		"check did not pass, an error, or you could only ask questions). This final",
-		"status line is mandatory on every run.",
+		review,
+		`  ${ACTION_PREFIX} <the exact prompt to run later, in an interactive session, to act on it, on one line>`,
+		status,
+		"",
+		...rules,
+		STATUS_RULE,
 	].join("\n");
 }
 
@@ -48,28 +77,7 @@ export function parseMarker(stdout: string): ParsedMarker | null {
 	return null;
 }
 
-// ---- review / action markers (jobs with notify = review | always) ----
-
-export const REVIEW_PREFIX = "PI_JOB_REVIEW:";
-export const ACTION_PREFIX = "PI_JOB_ACTION:";
-
-export function reviewInstruction(policy: "review" | "always"): string {
-	const when =
-		policy === "review"
-			? "If this run produced something the user needs to review, answer or decide,"
-			: "Summarise the outcome for the user:";
-	return [
-		`${when} put these lines just BEFORE the final status line:`,
-		`  ${REVIEW_PREFIX} <one short line, e.g. "3 emails to answer">`,
-		`  ${ACTION_PREFIX} <optional: the exact prompt to run later, in an interactive`,
-		"    session, to act on it, e.g. \"Open ~/x/review.md in Plannotator, following",
-		"    the email-review skill step 5.\" -- on one line>",
-		policy === "review"
-			? `Omit both lines when nothing needs the user. ${ACTION_PREFIX} without ${REVIEW_PREFIX} is ignored.`
-			: `${ACTION_PREFIX} is optional.`,
-	].join("\n");
-}
-
+// ---- review / action lines ----
 export interface ParsedReview {
 	review: string | null;
 	action: string | null;

@@ -59,12 +59,14 @@ Each job has a `notify` setting that decides when a run gets your attention:
 | `always` (default for `--at`) | it ran at all | one-shots |
 | `review` | the agent says something needs you | email triage, standup extraction |
 
-For `review` and `always` jobs the runner also asks the agent to put these lines
-before the status marker when it has something for you:
+For `review` and `always` jobs the closing block the runner asks for grows two
+optional lines before the status (for `always`, the review line is mandatory on
+success). Job prompts and skills never spell this format out: a job prompt just
+says, in plain words, what to tell you and what the follow-up is.
 
 ```
-PI_JOB_REVIEW: 3 emails to answer
-PI_JOB_ACTION: Open ~/.pi/email-review/2026-11-10/review.md in Plannotator, following the email-review skill step 5.
+PI_JOB_REVIEW: 3 emails to answer (2026-11-10)
+PI_JOB_ACTION: Open ~/.pi/email-review/2026-11-10/review.md in Plannotator per the email-review skill step 5.
 PI_JOB_STATUS: success
 ```
 

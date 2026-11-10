@@ -8,7 +8,7 @@ import path from "node:path";
 import * as store from "./store";
 import * as paths from "./paths";
 import { newExecutionId, sessionIdFor } from "./ids";
-import { markerInstruction, parseMarker, parseReview, reviewInstruction } from "./marker";
+import { closingInstruction, parseMarker, parseReview } from "./marker";
 import { notifyPolicy } from "./jobs";
 import type { Execution, ExecutionStatus, Job } from "./types";
 import { DARK_WAKE_REASON_PREFIX, detectWakeState, type WakeState } from "./darkwake";
@@ -51,10 +51,8 @@ export function buildPiArgs(job: Job, sessionId: string, now = new Date()): stri
 		"--name",
 		`${job.name} · ${fmtLocal(now)}`,
 		"--append-system-prompt",
-		markerInstruction(),
+		closingInstruction(notifyPolicy(job)),
 	];
-	const policy = notifyPolicy(job);
-	if (policy !== "failure") args.push("--append-system-prompt", reviewInstruction(policy));
 	if (job.model) args.push("--model", job.model);
 	if (job.isolate) args.push("--no-extensions");
 	if (job.tools && job.tools.length) args.push("--tools", job.tools.join(","));

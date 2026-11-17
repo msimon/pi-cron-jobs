@@ -13,10 +13,11 @@ import path from "node:path";
 import * as paths from "../src/core/paths";
 import * as store from "../src/core/store";
 import * as launchd from "../src/scheduler/launchd";
-import type { Execution, Job } from "../src/core/types";
+import type { Execution, Job, RunningExecution } from "../src/core/types";
 import { interruptKind } from "../src/core/outcome";
 import { filterJobs, isCompleted, isScheduled, JOB_TABS } from "../src/core/jobs";
 import { canUseTabs, tabbedSelect, type TabRow } from "./tabbed-select";
+import { fmtElapsed, watchExecution } from "./watch-view";
 
 const STATUS_KEY = "pi-cron-jobs";
 const REVIEW_STATUS_KEY = "pi-cron-jobs-review";
@@ -50,6 +51,10 @@ function lastExecutionByJob(execs: Execution[]): Map<string, Execution> {
 	return m;
 }
 
+function runningByJob(): Map<string, RunningExecution> {
+	return new Map(store.runningExecutions().map((r) => [r.jobId, r]));
+}
+
 function jobName(jobId: string): string {
 	return store.getJob(jobId)?.name ?? jobId;
 }
@@ -78,7 +83,8 @@ function renderStatus(ctx: any): void {
 	const active = jobs.filter(isScheduled).length;
 	const failing = jobs.filter((j) => isFailed(last.get(j.id), ignored)).length;
 	const warn = failing > 0 ? ` · ${failing} failing ⚠️` : "";
-	ctx.ui.setStatus(STATUS_KEY, `cron: ${active}${warn}`);
+	const running = store.runningExecutions().length > 0 ? " ●" : "";
+	ctx.ui.setStatus(STATUS_KEY, `cron: ${active}${running}${warn}`);
 	ctx.ui.setStatus(REVIEW_STATUS_KEY, reviewStatusText(store.openReviews()));
 }
 
@@ -181,9 +187,18 @@ function needsRetry(e: Execution | undefined, ignored: Set<string>): boolean {
 	return isFailed(e, ignored) || isInterruptedSkip(e);
 }
 
-function jobLabel(job: Job, last: Execution | undefined, ignored: Set<string>): string {
-	const status = last ? last.status : "never run";
-	const flag = needsRetry(last, ignored) ? " ⚠" : "";
+function jobLabel(
+	job: Job,
+	last: Execution | undefined,
+	ignored: Set<string>,
+	running?: RunningExecution,
+): string {
+	const status = running
+		? `▶ running ${fmtElapsed(running.startedAt)}`
+		: last
+			? last.status
+			: "never run";
+	const flag = !running && needsRetry(last, ignored) ? " ⚠" : "";
 	const sched =
 		job.schedule.kind === "cron" ? job.schedule.expr : `@ ${fmtLocal(job.schedule.at)}`;
 	const done = isCompleted(job) ? " · done" : "";
@@ -213,7 +228,12 @@ function reviewRows(open: Execution[]): TabRow<JobPick>[] {
 }
 
 // Rows for one set of jobs: an optional "Retry all failed" row, then one per job.
-function jobRows(jobs: Job[], last: Map<string, Execution>, ignored: Set<string>): TabRow<JobPick>[] {
+function jobRows(
+	jobs: Job[],
+	last: Map<string, Execution>,
+	ignored: Set<string>,
+	running: Map<string, RunningExecution>,
+): TabRow<JobPick>[] {
 	const toRetry = jobs.filter((j) => j.enabled && needsRetry(last.get(j.id), ignored));
 	const rows: TabRow<JobPick>[] = toRetry.length
 		? [
@@ -223,7 +243,11 @@ function jobRows(jobs: Job[], last: Map<string, Execution>, ignored: Set<string>
 				},
 			]
 		: [];
-	for (const j of jobs) rows.push({ label: jobLabel(j, last.get(j.id), ignored), value: { kind: "job", job: j } });
+	for (const j of jobs)
+		rows.push({
+			label: jobLabel(j, last.get(j.id), ignored, running.get(j.id)),
+			value: { kind: "job", job: j },
+		});
 	return rows;
 }
 
@@ -237,6 +261,7 @@ async function openJobsMenu(ctx: any): Promise<void> {
 	const last = lastExecutionByJob(store.readExecutions());
 	const ignored = store.readIgnoredExecutions();
 	const open = store.openReviews();
+	const running = runningByJob();
 
 	let pick: JobPick | undefined;
 	if (canUseTabs(ctx)) {
@@ -246,13 +271,13 @@ async function openJobsMenu(ctx: any): Promise<void> {
 			{ title: "To review", count: open.length, rows: reviewRows(open) },
 			...JOB_TABS.map((t) => {
 				const list = filterJobs(jobs, t.id);
-				return { title: t.title, count: list.length, rows: jobRows(list, last, ignored) };
+				return { title: t.title, count: list.length, rows: jobRows(list, last, ignored, running) };
 			}),
 		];
 		pick = await tabbedSelect(ctx, "Jobs", tabs, open.length ? 0 : 1);
 	} else {
 		// No interactive TUI (RPC, tests): plain select, review items first.
-		const rows = [...reviewRows(open), ...jobRows(jobs, last, ignored)];
+		const rows = [...reviewRows(open), ...jobRows(jobs, last, ignored, running)];
 		const labels = rows.map((r) => r.label);
 		const choice = await ctx.ui.select("Scheduled jobs:", labels);
 		pick = choice ? rows[labels.indexOf(choice)]?.value : undefined;
@@ -271,19 +296,26 @@ const EXEC_PAGE_SIZE = 15;
 
 async function openExecutionsMenu(ctx: any, job: Job, offset = 0): Promise<void> {
 	const all = store.executionsForJob(job.id).slice().reverse(); // newest first
-	if (!all.length) {
+	const running = store.runningExecutions().find((r) => r.jobId === job.id);
+	if (!all.length && !running) {
 		ctx.ui.notify(`"${job.name}" has not run yet.`, "info");
 		return;
 	}
-	const pageCount = Math.ceil(all.length / EXEC_PAGE_SIZE);
+	const pageCount = Math.max(1, Math.ceil(all.length / EXEC_PAGE_SIZE));
 	const start = Math.min(Math.max(0, offset), (pageCount - 1) * EXEC_PAGE_SIZE);
 	const page = all.slice(start, start + EXEC_PAGE_SIZE);
 	const ignored = store.readIgnoredExecutions();
 	const reviewDone = store.readReviewDone();
 	const labels = page.map((e) => execLabel(e, ignored, reviewDone));
+	// The run in flight sits above the newest finished one, on the first page.
+	const RUNNING =
+		running && start === 0
+			? `${fmtLocal(running.startedAt)}  ▶ running · ${fmtElapsed(running.startedAt)} — enter to watch`
+			: undefined;
 	const PREV = "↑ previous page (newer)";
 	const NEXT = "↓ next page (older)";
 	const menu = [
+		...(RUNNING ? [RUNNING] : []),
 		...(start > 0 ? [PREV] : []),
 		...labels,
 		...(start + EXEC_PAGE_SIZE < all.length ? [NEXT] : []),
@@ -292,11 +324,31 @@ async function openExecutionsMenu(ctx: any, job: Job, offset = 0): Promise<void>
 	const title = `Executions of "${job.name}" — page ${pageNum}/${pageCount}:`;
 	const choice = await ctx.ui.select(title, menu);
 	if (!choice) return;
+	if (choice === RUNNING && running) {
+		await watchRun(ctx, job, running);
+		return openExecutionsMenu(ctx, job, start); // back to the list, now with its result if it ended
+	}
 	if (choice === PREV) return openExecutionsMenu(ctx, job, start - EXEC_PAGE_SIZE);
 	if (choice === NEXT) return openExecutionsMenu(ctx, job, start + EXEC_PAGE_SIZE);
 	const exec = page[labels.indexOf(choice)];
 	if (!exec) return;
 	await openExecutionActions(ctx, job, exec, start);
+}
+
+// Open the read-only live view of a run in flight (TUI only).
+async function watchRun(ctx: any, job: Job, run: RunningExecution): Promise<void> {
+	if (!canUseTabs(ctx)) {
+		ctx.ui.notify(
+			`"${job.name}" is running since ${fmtLocal(run.startedAt)} — log: ${run.logPath}`,
+			"info",
+		);
+		return;
+	}
+	await watchExecution(ctx, {
+		jobName: job.name,
+		run,
+		sessionFile: () => findSessionFile(run.sessionId),
+	});
 }
 
 const ACTION_RESUME = "↩ Resume conversation";

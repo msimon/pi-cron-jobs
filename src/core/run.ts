@@ -248,7 +248,12 @@ export async function runJob(
 	}
 
 	// overlap policy = drop
-	const release = store.acquireLock(job.id);
+	const release = store.acquireLock(job.id, {
+		executionId,
+		sessionId,
+		logPath,
+		startedAt: now.toISOString(),
+	});
 	if (!release) {
 		return finalize(job, executionId, sessionId, logPath, now, {
 			status: "skipped",

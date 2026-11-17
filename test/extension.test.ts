@@ -619,3 +619,156 @@ test("live: a window announces new failures and review items, and stays quiet ot
 	expect(extMod.announceNewRuns(fakeCtx(again), next)).toBe(next);
 	expect(again.notify).toEqual([]);
 });
+
+// ---- runs in flight ----
+
+const watchMod = await import("../extension/watch-view");
+
+function startRun(jobId: string, executionId: string) {
+	return store.acquireLock(jobId, {
+		executionId,
+		sessionId: `${jobId}__${executionId}`,
+		logPath: path.join(dir, `${executionId}.log`),
+		startedAt: new Date(Date.now() - 125_000).toISOString(),
+	})!;
+}
+
+test("runningExecutions lists live runs only; old-style and dead locks are ignored", () => {
+	const release = startRun("triage", "live1");
+	writeFileSync(
+		path.join(paths.root, "ghost.lock"),
+		JSON.stringify({ jobId: "ghost", executionId: "g", pid: 2 ** 22 + 12345, startedAt: "x" }),
+	);
+	const ids = store.runningExecutions().map((r) => r.executionId);
+	expect(ids).toEqual(["live1"]); // busy.lock ("1") and the dead ghost are left out
+	expect(store.acquireLock("triage")).toBeNull(); // still a lock
+	release();
+	expect(store.runningExecutions()).toEqual([]);
+});
+
+test("a running job shows in the status bar, its /jobs row and on top of its runs", async () => {
+	const release = startRun("triage", "live2");
+	try {
+		const cap: Captured = { notify: [], status: [] };
+		const { handlers, commands } = wire();
+		await handlers.session_start!({}, fakeCtx(cap));
+		expect(cap.status.find((s) => s?.startsWith("cron:"))).toMatch(/^cron: \d+ ●/);
+		await handlers.session_shutdown!({}, fakeCtx(cap));
+
+		let jobsMenu: string[] = [];
+		let runsMenu: string[] = [];
+		const ctx = scriptedCtx(cap, [
+			(options) => {
+				jobsMenu = options;
+				return pickJob(options);
+			},
+			(options) => {
+				runsMenu = options;
+				return options[0]; // the run in flight
+			},
+			() => undefined, // the list again after watching
+		]);
+		await commands.jobs!.handler("", ctx);
+		expect(jobsMenu.find((o) => o.startsWith("Triage"))).toContain("— ▶ running 2m");
+		expect(runsMenu[0]).toMatch(/▶ running · 2m \d+s — enter to watch$/);
+		expect(runsMenu[1]).not.toContain("running");
+		// no TUI here: picking it says where the log is instead of opening the view
+		expect(cap.notify.some(([m]) => m.includes("is running since") && m.includes("live2.log"))).toBe(true);
+	} finally {
+		release();
+	}
+
+	const after: Captured = { notify: [], status: [] };
+	const { handlers } = wire();
+	await handlers.session_start!({}, fakeCtx(after));
+	expect(after.status.find((s) => s?.startsWith("cron:"))).not.toContain("●");
+	await handlers.session_shutdown!({}, fakeCtx(after));
+});
+
+test("sessionBlocks shows prompt, text, tool calls and result heads; skips the rest", () => {
+	const lines = [
+		{ type: "session", id: "s" },
+		{ type: "message", message: { role: "system", content: "sys" } },
+		{ type: "message", message: { role: "user", content: [{ type: "text", text: "Book rooms" }] } },
+		{
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "a\nb\nc\nd" },
+					{ type: "text", text: "Checking the calendar." },
+					{ type: "toolCall", name: "bash", arguments: { command: "gcalcli\n agenda" } },
+				],
+			},
+		},
+		{
+			type: "message",
+			message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "1\n2\n3\n4\n5\n6" }] },
+		},
+		{ type: "custom", data: {} },
+	];
+	const jsonl = `${lines.map((l) => JSON.stringify(l)).join("\n")}\n{"type":"mess`; // half-written tail
+	expect(watchMod.sessionBlocks(jsonl)).toEqual([
+		{ style: "accent", text: "▸ Book rooms" },
+		{ style: "dim", text: "a\nb\n… (2 more lines)" },
+		{ style: "text", text: "Checking the calendar." },
+		{ style: "muted", text: "→ bash: gcalcli agenda" },
+		{ style: "dim", text: "  1\n  2\n  3\n  4\n  … (2 more lines)" },
+	]);
+});
+
+test("watch view: live conversation, then the final status once the run ends", async () => {
+	const release = startRun("triage", "live3");
+	const run = store.runningExecutions()[0]!;
+	const sessionFile = path.join(dir, "live3.jsonl");
+	writeFileSync(
+		sessionFile,
+		`${JSON.stringify({ type: "message", message: { role: "user", content: "Do it" } })}\n`,
+	);
+
+	const theme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s };
+	const keybindings = { matches: (data: string, id: string) => data === "\x1b" && id === "tui.select.cancel" };
+	let comp: any;
+	let closed = false;
+	let overlay: unknown;
+	const ctx = {
+		ui: {
+			custom: (factory: any, opts: any) => {
+				overlay = opts?.overlay;
+				return new Promise<void>((resolve) => {
+					comp = factory({ requestRender: () => {}, terminal: { rows: 40 } }, theme, keybindings, () => {
+						closed = true;
+						resolve();
+					});
+				});
+			},
+		},
+	};
+	const done = watchMod.watchExecution(ctx, { jobName: "Triage", run, sessionFile: () => sessionFile });
+	expect(overlay).toBe(true);
+	let screen = comp.render(100).join("\n");
+	expect(screen).toContain("Watching Triage · ▶ running 2m");
+	expect(screen).toContain("▸ Do it");
+
+	// the run ends: ledger record, lock released
+	store.appendExecution({
+		jobId: "triage",
+		executionId: "live3",
+		sessionId: run.sessionId,
+		startedAt: run.startedAt,
+		endedAt: new Date().toISOString(),
+		exitCode: 0,
+		status: "success",
+		reason: null,
+		warning: false,
+		logPath: run.logPath,
+	});
+	release();
+	await new Promise((r) => setTimeout(r, 1200)); // one poll
+	screen = comp.render(100).join("\n");
+	expect(screen).toContain("finished: success");
+
+	comp.handleInput("\x1b");
+	await done;
+	expect(closed).toBe(true);
+});

@@ -3,6 +3,7 @@
 
 import {
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	writeFileSync,
 	renameSync,
@@ -14,7 +15,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import * as paths from "./paths";
-import type { AppState, Execution, Job } from "./types";
+import type { AppState, Execution, Job, RunningExecution } from "./types";
 import { expiredCompletedJobs } from "./jobs";
 
 function ensureRoot(): void {
@@ -177,14 +178,21 @@ export function openReviews(): Execution[] {
 
 // ---- per-job lock (overlap policy = drop) ----
 // Best-effort exclusive lock via O_EXCL lockfile. Returns a release fn, or null
-// if a run for this job is already in progress.
+// if a run for this job is already in progress. The file holds the run's
+// details as JSON, so /jobs can show and watch the run while it is in flight.
 
-export function acquireLock(jobId: string): (() => void) | null {
+const LOCK_SUFFIX = ".lock";
+
+export function acquireLock(
+	jobId: string,
+	run?: Omit<RunningExecution, "jobId" | "pid">,
+): (() => void) | null {
 	ensureRoot();
-	const lockPath = path.join(paths.root, `${jobId}.lock`);
+	const lockPath = path.join(paths.root, `${jobId}${LOCK_SUFFIX}`);
 	try {
 		const fd = openSync(lockPath, "wx"); // fails if exists
-		writeFileSync(fd, String(process.pid));
+		const info = run ? JSON.stringify({ jobId, pid: process.pid, ...run }) : String(process.pid);
+		writeFileSync(fd, info);
 		closeSync(fd);
 	} catch {
 		return null;
@@ -199,4 +207,35 @@ export function acquireLock(jobId: string): (() => void) | null {
 			// already gone
 		}
 	};
+}
+
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err: unknown) {
+		// EPERM: it exists, it is just not ours to signal
+		return (err as NodeJS.ErrnoException)?.code === "EPERM";
+	}
+}
+
+// Runs in flight, oldest first: every lock file with run details whose wrapper
+// is still alive. Old-style locks (a bare pid) and stale ones are left out.
+export function runningExecutions(): RunningExecution[] {
+	let files: string[];
+	try {
+		files = readdirSync(paths.root).filter((f) => f.endsWith(LOCK_SUFFIX));
+	} catch {
+		return [];
+	}
+	const out: RunningExecution[] = [];
+	for (const f of files) {
+		try {
+			const run = JSON.parse(readFileSync(path.join(paths.root, f), "utf8")) as RunningExecution;
+			if (run && typeof run === "object" && run.executionId && pidAlive(run.pid)) out.push(run);
+		} catch {
+			// not JSON (old format), or removed while reading
+		}
+	}
+	return out.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }

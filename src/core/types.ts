@@ -68,6 +68,18 @@ export interface Execution {
 	action?: string | null; // PI_JOB_ACTION: prompt sent by "Run action"
 }
 
+// A run in flight. Lives in the job's lock file (not the ledger, which only
+// gets a record when the run ends), so a crash leaves nothing behind but a
+// stale lock, which runningExecutions() ignores once its pid is gone.
+export interface RunningExecution {
+	jobId: string;
+	executionId: string;
+	sessionId: string;
+	logPath: string;
+	startedAt: string;
+	pid: number;
+}
+
 export interface AppState {
 	lastSeenTs?: string; // ISO of the most recent execution the extension has shown
 	ignoredExecutionIds?: string[]; // executions acknowledged by hand; excluded from failure counts

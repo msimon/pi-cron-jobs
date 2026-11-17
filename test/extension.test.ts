@@ -646,6 +646,30 @@ test("runningExecutions lists live runs only; old-style and dead locks are ignor
 	expect(store.runningExecutions()).toEqual([]);
 });
 
+test("a lock left by a dead wrapper is taken over; a live or unreadable one is not", () => {
+	const lock = (id: string) => path.join(paths.root, `${id}.lock`);
+	const deadPid = 2 ** 22 + 12345;
+
+	writeFileSync(lock("stale-json"), JSON.stringify({ jobId: "stale-json", pid: deadPid }));
+	writeFileSync(lock("stale-old"), String(deadPid)); // pre-JSON format
+	for (const id of ["stale-json", "stale-old"]) {
+		const release = store.acquireLock(id, {
+			executionId: `${id}-1`,
+			sessionId: "s",
+			logPath: "x",
+			startedAt: new Date().toISOString(),
+		});
+		expect(release).not.toBeNull();
+		expect(JSON.parse(readFileSync(lock(id), "utf8")).pid).toBe(process.pid);
+		release!();
+	}
+
+	writeFileSync(lock("alive"), String(process.pid));
+	expect(store.acquireLock("alive")).toBeNull();
+	writeFileSync(lock("garbled"), "");
+	expect(store.acquireLock("garbled")).toBeNull();
+});
+
 test("a running job shows in the status bar, its /jobs row and on top of its runs", async () => {
 	const release = startRun("triage", "live2");
 	try {

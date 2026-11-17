@@ -180,8 +180,22 @@ export function openReviews(): Execution[] {
 // Best-effort exclusive lock via O_EXCL lockfile. Returns a release fn, or null
 // if a run for this job is already in progress. The file holds the run's
 // details as JSON, so /jobs can show and watch the run while it is in flight.
+// A lock left by a wrapper that died (killed while the Mac slept, crashed) is
+// taken over instead of skipping every later run as "overlapping".
 
 const LOCK_SUFFIX = ".lock";
+
+// pid in a lock file, JSON or the old bare-number format; null if unreadable.
+function lockPid(lockPath: string): number | null {
+	try {
+		const raw = readFileSync(lockPath, "utf8").trim();
+		const parsed = JSON.parse(raw);
+		const pid = typeof parsed === "number" ? parsed : parsed?.pid;
+		return Number.isInteger(pid) && pid > 0 ? pid : null;
+	} catch {
+		return null;
+	}
+}
 
 export function acquireLock(
 	jobId: string,
@@ -189,13 +203,28 @@ export function acquireLock(
 ): (() => void) | null {
 	ensureRoot();
 	const lockPath = path.join(paths.root, `${jobId}${LOCK_SUFFIX}`);
-	try {
-		const fd = openSync(lockPath, "wx"); // fails if exists
-		const info = run ? JSON.stringify({ jobId, pid: process.pid, ...run }) : String(process.pid);
-		writeFileSync(fd, info);
-		closeSync(fd);
-	} catch {
-		return null;
+	const info = run ? JSON.stringify({ jobId, pid: process.pid, ...run }) : String(process.pid);
+	const tryCreate = (): boolean => {
+		try {
+			const fd = openSync(lockPath, "wx"); // fails if exists
+			writeFileSync(fd, info);
+			closeSync(fd);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	if (!tryCreate()) {
+		// Only a lock whose owner is known to be gone is broken. An unreadable one
+		// (being written right now) is left alone.
+		const pid = lockPid(lockPath);
+		if (pid === null || pidAlive(pid)) return null;
+		try {
+			unlinkSync(lockPath);
+		} catch {
+			// someone else took it over first
+		}
+		if (!tryCreate()) return null;
 	}
 	let released = false;
 	return () => {
